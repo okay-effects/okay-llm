@@ -34,6 +34,12 @@ object Gateway:
         case _ => Http.json(404, Json.obj("error" -> Json.obj("type" -> s("not_found"), "message" -> s(path))))
     yield ()
 
+  /** a generation's line in the log: the prompt (and how much of it a cache gave), the answer, the speeds */
+  private def report(t: Timing): String =
+    val cached = if t.cachedTokens > 0 then s" (${t.cachedTokens} cached)" else ""
+    f"${t.promptTokens} in$cached, prefill ${t.prefillNanos / 1e6}%.0f ms; ${t.tokens} out, " +
+      f"${t.decodePerSecond}%.1f tok/s"
+
   private def ident[R[_]: Has[Clock] : Has[Fresh]]: (String, Long) ! R =
     for
       t <- Clock.now
@@ -61,7 +67,8 @@ object Gateway:
       (id, created) = ids
       model <- Llm.name
       _ <-
-        if !stream then Llm.complete(ask).flatMap(f => Http.json(200, OpenAi.response(id, model, created, f)))
+        if !stream then Llm.complete(ask).flatMap(f =>
+          Log.info(report(f.timing)).andThen(Http.json(200, OpenAi.response(id, model, created, f))))
         else
           def delta(parts: Vector[Part]): Vector[String] = parts.map {
             case Part.Text(t) => OpenAi.chunk(id, model, created, Json.obj("content" -> s(t)))
@@ -82,7 +89,7 @@ object Gateway:
               else unit[R]
             _ <- Http.send("data: [DONE]\n\n")
             _ <- Http.close
-            _ <- Log.info(f"${f.timing.promptTokens} in, ${f.timing.tokens} out, ${f.timing.decodePerSecond}%.1f tok/s")
+            _ <- Log.info(report(f.timing))
           yield ()
     yield ()
 
@@ -99,7 +106,8 @@ object Gateway:
       id = ids._1
       model <- Llm.name
       _ <-
-        if !stream then Llm.complete(ask).flatMap(f => Http.json(200, Anthropic.message(id, model, f)))
+        if !stream then Llm.complete(ask).flatMap(f =>
+          Log.info(report(f.timing)).andThen(Http.json(200, Anthropic.message(id, model, f))))
         else
           import Anthropic.event
           def stop(b: Blocks): (Blocks, Vector[String]) = b.open match
@@ -154,6 +162,6 @@ object Gateway:
               "usage" -> Json.obj("output_tokens" -> n(f.timing.tokens)))))
             _ <- Http.send(event("message_stop", Json.obj("type" -> s("message_stop"))))
             _ <- Http.close
-            _ <- Log.info(f"${f.timing.promptTokens} in, ${f.timing.tokens} out, ${f.timing.decodePerSecond}%.1f tok/s")
+            _ <- Log.info(report(f.timing))
           yield ()
     yield ()

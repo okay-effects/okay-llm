@@ -51,8 +51,10 @@ trait Backend:
 | `POST /v1/messages` | Anthropic: whole or streamed — `thinking`, `text`, `tool_use` blocks |
 | `POST /v1/messages/count_tokens`, `GET /v1/models`, `GET /health` | |
 
-A turn streams through a `Streamer`: thinking, then text; a tool call held back to the end. System messages a
-client sends mid-conversation (Claude Code does) go first, as one: most chat templates take one there only.
+Claude Code's billing-header system block (a hash new each request) is dropped: a prompt that differs from its first
+tokens has no prefix for a backend to reuse. A turn streams through a `Streamer`: thinking, then text; a tool call held back to the end. A system message a
+client sends mid-conversation (Claude Code does, each turn) stays where it is, as a user's: most chat templates take a
+system message first only, and moving it there would change the prompt's beginning each turn.
 
 Checked: every program under fake handlers (13 tests, both platforms); Claude Code against it on okay-mlx — a 13k-token
 prompt with its tools, Qwen3.6-35B-A3B calling `Write` to make a file.

@@ -12,22 +12,24 @@ final case class Ask(messages: Vector[Json], tools: Vector[Json] = Vector.empty,
     thinking: Boolean = false)
 
 object Ask:
-  /** system messages wherever they are (a client may send one mid-conversation: Claude Code does) put together, in
-   * order, as the first message — the only place most chat templates take one (Qwen3.6's raises otherwise) */
+  /** a system message where a chat template takes none — after the first message (Claude Code sends one each turn,
+   * mid-conversation; Qwen3.6's template raises) — as a user message, where it is. Not moved to the first: the
+   * prompt's beginning stays the same from turn to turn, and a cache of prefixes keeps it */
   def systemFirst(messages: Vector[Json]): Vector[Json] =
-    val (system, rest) = messages.partition(_("role") == Json.Str("system"))
-    if system.isEmpty || (system.length == 1 && messages.head("role") == Json.Str("system")) then messages
-    else
-      val text = system.map(_("content")).collect { case Json.Str(t) => t }.filter(_.nonEmpty).mkString("\n\n")
-      Json.obj("role" -> Json.Str("system"), "content" -> Json.Str(text)) +: rest
+    messages.zipWithIndex.map { (m, i) =>
+      if i > 0 && m("role") == Json.Str("system") then
+        Json.Obj(m.record.map((k, v) => if k == "role" then k -> Json.Str("user") else k -> v))
+      else m
+    }
 
 /** a generation going on */
 final case class Gen(id: Long)
 
 /** what a generation measured: the prompt's tokens and the time to the first new one (the prefill), the tokens made
- * and their time after the first (the decode) */
-final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, decodeNanos: Long):
-  def prefillPerSecond: Double = promptTokens / (prefillNanos / 1e9)
+ * and their time after the first (the decode); how many of the prompt's a cache of prefixes gave */
+final case class Timing(promptTokens: Int, prefillNanos: Long, tokens: Int, decodeNanos: Long, cachedTokens: Int = 0):
+  /** the prompt's tokens computed a second — not those a cache of prefixes gave */
+  def prefillPerSecond: Double = (promptTokens - cachedTokens) / (prefillNanos / 1e9)
   def decodePerSecond: Double = if tokens <= 1 then 0 else (tokens - 1) / (decodeNanos / 1e9)
 
 /** a generation done: its turn read, what it measured, whether the model ended it (else: the limit) */

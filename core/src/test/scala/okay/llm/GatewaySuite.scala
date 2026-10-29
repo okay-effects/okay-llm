@@ -100,9 +100,15 @@ class GatewaySuite extends munit.FunSuite:
     val text = parts.collect { case Streamer.Part.Text(t) => t }.mkString
     assertEquals((thinking, text), ("thinking hard", "answer"))
 
-  test("system messages mid-conversation go first, as one"):
+  test("a system message mid-conversation stays where it is, as a user's: the prompt's beginning unchanged"):
     val a = Anthropic.ask(Json.fromText("""{"max_tokens": 8, "system": [{"type": "text", "text": "You are helpful."}],
       "messages": [{"role": "user", "content": "hi"}, {"role": "system", "content": [{"type": "text",
       "text": "# Environment"}]}, {"role": "assistant", "content": "hello"}]}"""))
     assertEquals(a.messages.map(m => m("role").string -> m("content").string), Vector(
-      "system" -> "You are helpful.\n\n# Environment", "user" -> "hi", "assistant" -> "hello"))
+      "system" -> "You are helpful.", "user" -> "hi", "user" -> "# Environment", "assistant" -> "hello"))
+
+  test("Claude Code's billing header is no part of the prompt"):
+    val a = Anthropic.ask(Json.fromText("""{"max_tokens": 8, "system": [{"type": "text",
+      "text": "x-anthropic-billing-header: cc_version=2.1.311.69e; cc_entrypoint=sdk-cli;"},
+      {"type": "text", "text": "You are an agent."}], "messages": [{"role": "user", "content": "hi"}]}"""))
+    assertEquals(a.messages.head("content").string, "You are an agent.")

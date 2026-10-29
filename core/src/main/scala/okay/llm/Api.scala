@@ -139,8 +139,15 @@ object OpenAi:
 /** ANTHROPIC'S MESSAGES: a request as an `Ask`, a turn as a message or as a stream's events */
 object Anthropic:
   def ask(body: Json): Ask =
-    val system = body.field("system").map(text).filter(_.nonEmpty)
-      .map(s => Json.obj("role" -> js("system"), "content" -> js(s))).toVector
+    // Claude Code's first system block is its billing header, a hash new each request — not for the model, and a
+    // prompt that differs from its first tokens has no prefix to reuse
+    val system = body.field("system").map {
+      case Json.Arr(blocks) =>
+        Json.Arr(blocks.filterNot(b => b("text") match
+          case Json.Str(t) => t.startsWith("x-anthropic-billing-header:")
+          case _ => false))
+      case other => other
+    }.map(text).filter(_.nonEmpty).map(s => Json.obj("role" -> js("system"), "content" -> js(s))).toVector
     val turns = body("messages").list.flatMap { m =>
       val role = m("role").string
       m("content") match
