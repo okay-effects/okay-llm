@@ -112,3 +112,9 @@ class GatewaySuite extends munit.FunSuite:
       "text": "x-anthropic-billing-header: cc_version=2.1.311.69e; cc_entrypoint=sdk-cli;"},
       {"type": "text", "text": "You are an agent."}], "messages": [{"role": "user", "content": "hi"}]}"""))
     assertEquals(a.messages.head("content").string, "You are an agent.")
+
+  test("a request's sampling, each field unset when it says none"):
+    val a = OpenAi.ask(Json.fromText("""{"messages": [], "temperature": 0.7, "top_p": 0.8, "seed": 5}"""))
+    assertEquals(a.sampling, Sampling(Some(0.7), Some(0.8), None, Some(5L)))
+    assertEquals(Anthropic.ask(Json.fromText("""{"messages": [], "top_k": 20}""")).sampling,
+      Sampling(None, None, Some(20), None))

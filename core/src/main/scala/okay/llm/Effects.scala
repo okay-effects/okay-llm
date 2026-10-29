@@ -7,9 +7,20 @@ import scala.collection.mutable
 import okay.scala3.*
 
 /** what is asked of a model: a conversation (messages as a chat template takes them: role, content, tool calls), the
- * tools it may call, how many tokens at most, whether it thinks first */
+ * tools it may call, how many tokens at most, whether it thinks first; how tokens are drawn — each unset, the
+ * model's own (a backend's default) */
 final case class Ask(messages: Vector[Json], tools: Vector[Json] = Vector.empty, maxTokens: Int = 1024,
-    thinking: Boolean = false)
+    thinking: Boolean = false, sampling: Sampling = Sampling())
+
+/** HOW TOKENS ARE DRAWN, as a request says: temperature (0: greedy), top_p, top_k, a seed; each unset, the model's */
+final case class Sampling(temperature: Option[Double] = None, topP: Option[Double] = None, topK: Option[Int] = None,
+    seed: Option[Long] = None)
+
+object Sampling:
+  /** a request's fields: `temperature`, `top_p`, `top_k`, `seed` */
+  def of(body: Json): Sampling =
+    Sampling(body.field("temperature").map(_.double), body.field("top_p").map(_.double),
+      body.field("top_k").map(_.int), body.field("seed").map(_.long))
 
 object Ask:
   /** a system message where a chat template takes none — after the first message (Claude Code sends one each turn,

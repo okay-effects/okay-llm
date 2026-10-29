@@ -43,7 +43,8 @@ trait Backend:
 ## The gateway
 
 `Gateway.route(request)` — programs of those effects; `Server.run(port)` serves them, HTTP/1.1 on
-`java.net.ServerSocket` (the JVM and Scala Native alike), a request at a time.
+`java.net.ServerSocket` (the JVM and Scala Native alike), a connection a thread: requests at once, a backend
+serializing what it must. A request's `temperature`, `top_p`, `top_k`, `seed` reach the backend (`Ask.sampling`).
 
 | endpoint | |
 |---|---|
