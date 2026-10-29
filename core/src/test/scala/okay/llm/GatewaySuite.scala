@@ -41,7 +41,8 @@ class GatewaySuite extends munit.FunSuite:
     val es = events(body)
     val text = es.flatMap(_("choices").list.headOption).flatMap(_("delta").field("content")).map(_.string).mkString
     assertEquals(text, "The capital is Paris.")
-    assertEquals(es.flatMap(_("choices").list.headOption).flatMap(_.field("finish_reason")).map(_.string), Vector("stop"))
+    assertEquals(es.flatMap(_("choices").list.headOption).flatMap(_.field("finish_reason")).map(_.string),
+      Vector("stop"))
     assert(es.last.field("usage").isDefined)
     assert(body.endsWith("data: [DONE]\n\n"))
 
@@ -52,7 +53,8 @@ class GatewaySuite extends munit.FunSuite:
     assertEquals(choice("finish_reason").string, "tool_calls")
     assertEquals(choice("message")("content").string, "Checking.")
     val f = choice("message")("tool_calls").list.head("function")
-    assertEquals((f("name").string, Json.fromText(f("arguments").string)), ("get_weather", Json.fromText("""{"city":"Paris"}""")))
+    assertEquals((f("name").string, Json.fromText(f("arguments").string)),
+      ("get_weather", Json.fromText("""{"city":"Paris"}""")))
     // streamed: the text before the call, then the call, the reason
     val es = events(call("POST", "/v1/chat/completions", req.dropRight(1) + """, "stream": true}""", toolAnswer)._3)
     val deltas = es.flatMap(_("choices").list.headOption).map(_("delta"))
@@ -63,7 +65,8 @@ class GatewaySuite extends munit.FunSuite:
     val req = """{"model": "m", "max_tokens": 64, "system": "Be brief.",
       "messages": [{"role": "user", "content": [{"type": "text", "text": "Capital of France?"}]}]}"""
     val m = Json.fromText(call("POST", "/v1/messages", req)._3)
-    assertEquals(m("content").list.map(b => b("type").string -> b("text").string), Vector("text" -> "The capital is Paris."))
+    assertEquals(m("content").list.map(b => b("type").string -> b("text").string),
+      Vector("text" -> "The capital is Paris."))
     assertEquals(m("stop_reason").string, "end_turn")
     val t = Json.fromText(call("POST", "/v1/messages", req.dropRight(1) +
       """, "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]}""", toolAnswer)._3)

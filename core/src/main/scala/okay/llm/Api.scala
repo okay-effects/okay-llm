@@ -104,7 +104,8 @@ object OpenAi:
       Json.obj(fields.result()*)
     }
     val max = body.field("max_completion_tokens").orElse(body.field("max_tokens")).map(_.int).getOrElse(1024)
-    val thinking = body.field("chat_template_kwargs").flatMap(_.field("enable_thinking")).exists(_ == Json.Bool(true)) ||
+    val thinking =
+      body.field("chat_template_kwargs").flatMap(_.field("enable_thinking")).exists(_ == Json.Bool(true)) ||
       body.field("reasoning_effort").isDefined
     Ask(Ask.systemFirst(messages), body.field("tools").map(_.list).getOrElse(Vector.empty), max, thinking)
 
