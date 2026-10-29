@@ -17,6 +17,15 @@ run(Console.stdout(Llm.on(backend)(ask[App]("What is a KV cache?", 256))))   // 
 run(Console.collect(Llm.fake(_ => "Paris.")(ask[App]("Capital of France?", 16))))   // no model at all
 ```
 
+## Get it
+
+```scala
+resolvers ++= Seq("okay-llm" at "https://okay-effects.github.io/okay-llm/maven",
+  "okay-scala" at "https://okay-effects.github.io/okay-scala/maven",
+  "okay-simple" at "https://okay-effects.github.io/okay-simple/maven")
+libraryDependencies += "io.github.okay-effects" %%% "okay-llm" % "0.1.0"   // the JVM and Scala Native
+```
+
 ## A backend
 
 Hardware is a `Llm.Backend` — a prompt's size, and a generation as pieces of text — and `Llm.on(backend)` makes the
