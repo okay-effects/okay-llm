@@ -68,6 +68,7 @@ class GatewaySuite extends munit.FunSuite:
     assertEquals(m("content").list.map(b => b("type").string -> b("text").string),
       Vector("text" -> "The capital is Paris."))
     assertEquals(m("stop_reason").string, "end_turn")
+    assertEquals(m("model").string, "m")   // as the request named it
     val t = Json.fromText(call("POST", "/v1/messages", req.dropRight(1) +
       """, "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]}""", toolAnswer)._3)
     assertEquals(t("stop_reason").string, "tool_use")

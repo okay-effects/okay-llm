@@ -68,7 +68,8 @@ object Gateway:
     for
       ids <- ident
       (id, created) = ids
-      model <- Llm.name
+      // the model as the request named it (a backend of several answers by that one), else the backend's
+      model <- ask.model.fold(Llm.name)(pure)
       _ <-
         if !stream then Llm.complete(ask).flatMap(f =>
           Log.info(report(f.timing)).andThen(Http.json(200, OpenAi.response(id, model, created, f))))
@@ -107,7 +108,8 @@ object Gateway:
     for
       ids <- ident
       id = ids._1
-      model <- Llm.name
+      // the model as the request named it (a backend of several answers by that one), else the backend's
+      model <- ask.model.fold(Llm.name)(pure)
       _ <-
         if !stream then Llm.complete(ask).flatMap(f =>
           Log.info(report(f.timing)).andThen(Http.json(200, Anthropic.message(id, model, f))))
