@@ -12,15 +12,17 @@ import okay.scala3.*
 final case class Ask(messages: Vector[Json], tools: Vector[Json] = Vector.empty, maxTokens: Int = 1024,
     thinking: Boolean = false, sampling: Sampling = Sampling())
 
-/** HOW TOKENS ARE DRAWN, as a request says: temperature (0: greedy), top_p, top_k, a seed; each unset, the model's */
+/** HOW TOKENS ARE DRAWN, as a request says: temperature (0: greedy), top_p, top_k, a seed, OpenAI's presence and
+ * frequency penalties (against a loop); each unset, the backend's */
 final case class Sampling(temperature: Option[Double] = None, topP: Option[Double] = None, topK: Option[Int] = None,
-    seed: Option[Long] = None)
+    seed: Option[Long] = None, presencePenalty: Option[Double] = None, frequencyPenalty: Option[Double] = None)
 
 object Sampling:
-  /** a request's fields: `temperature`, `top_p`, `top_k`, `seed` */
+  /** a request's fields: `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty` */
   def of(body: Json): Sampling =
     Sampling(body.field("temperature").map(_.double), body.field("top_p").map(_.double),
-      body.field("top_k").map(_.int), body.field("seed").map(_.long))
+      body.field("top_k").map(_.int), body.field("seed").map(_.long), body.field("presence_penalty").map(_.double),
+      body.field("frequency_penalty").map(_.double))
 
 object Ask:
   /** a system message where a chat template takes none — after the first message (Claude Code sends one each turn,

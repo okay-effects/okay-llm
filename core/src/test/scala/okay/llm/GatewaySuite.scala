@@ -118,3 +118,5 @@ class GatewaySuite extends munit.FunSuite:
     assertEquals(a.sampling, Sampling(Some(0.7), Some(0.8), None, Some(5L)))
     assertEquals(Anthropic.ask(Json.fromText("""{"messages": [], "top_k": 20}""")).sampling,
       Sampling(None, None, Some(20), None))
+    assertEquals(OpenAi.ask(Json.fromText("""{"messages": [], "presence_penalty": 1.5}""")).sampling,
+      Sampling(presencePenalty = Some(1.5)))
