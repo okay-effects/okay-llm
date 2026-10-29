@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 import okay.scala3.*
 import okay.scala3.std.*
 

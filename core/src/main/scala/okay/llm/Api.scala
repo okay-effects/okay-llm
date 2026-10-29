@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 
 
 /** A TURN AS IT STREAMS: the model's text, piece by piece, as thinking, then text; a tool call held back (the whole
@@ -81,8 +83,8 @@ private def text(c: Json): String = c match
   case Json.Null => ""
   case other => other.render
 
-private def str(s: String): Json = Json.Str(s)
-private def num(n: Long): Json = Json.Num(n.toDouble)
+private def js(s: String): Json = Json.Str(s)
+private def jn(n: Long): Json = Json.num(n)
 
 /** OPENAI'S CHAT COMPLETIONS: a request as an `Ask`, a turn as a response or as chunks of a stream */
 object OpenAi:
@@ -90,13 +92,13 @@ object OpenAi:
     val messages = body("messages").items.map { m =>
       val fields = Vector.newBuilder[(String, Json)]
       fields += "role" -> m("role")
-      fields += "content" -> str(text(m("content")))
+      fields += "content" -> js(text(m("content")))
       m.get("tool_calls").foreach(calls => fields += "tool_calls" -> Json.Arr(calls.items.map { c =>
         val f = c("function")
         val args = f("arguments") match
-          case Json.Str(s) => try Json.parse(s) catch case _: IllegalArgumentException => Json.Str(s)
+          case Json.Str(s) => try parseJson(s) catch case _: IllegalArgumentException => Json.Str(s)
           case a => a
-        Json.obj("type" -> str("function"), "function" -> Json.obj("name" -> f("name"), "arguments" -> args))
+        Json.obj("type" -> js("function"), "function" -> Json.obj("name" -> f("name"), "arguments" -> args))
       }))
       m.get("reasoning_content").foreach(r => fields += "reasoning_content" -> r)
       Json.obj(fields.result()*)
@@ -110,75 +112,75 @@ object OpenAi:
     if f.reply.toolCalls.nonEmpty then "tool_calls" else if f.byStop then "stop" else "length"
 
   def toolCalls(id: String, calls: Vector[ToolCall]): Json = Json.Arr(calls.zipWithIndex.map((c, k) =>
-    Json.obj("index" -> num(k), "id" -> str(s"call_${id}_$k"), "type" -> str("function"),
-      "function" -> Json.obj("name" -> str(c.name), "arguments" -> str(c.arguments.render)))))
+    Json.obj("index" -> jn(k), "id" -> js(s"call_${id}_$k"), "type" -> js("function"),
+      "function" -> Json.obj("name" -> js(c.name), "arguments" -> js(c.arguments.render)))))
 
   def usage(f: Finished): Json =
-    Json.obj("prompt_tokens" -> num(f.timing.promptTokens), "completion_tokens" -> num(f.timing.tokens),
-      "total_tokens" -> num(f.timing.promptTokens + f.timing.tokens))
+    Json.obj("prompt_tokens" -> jn(f.timing.promptTokens), "completion_tokens" -> jn(f.timing.tokens),
+      "total_tokens" -> jn(f.timing.promptTokens + f.timing.tokens))
 
   def response(id: String, model: String, created: Long, f: Finished): Json =
-    val message = Vector("role" -> str("assistant"), "content" -> str(f.reply.content)) ++
-      (if f.reply.reasoning.nonEmpty then Vector("reasoning_content" -> str(f.reply.reasoning)) else Vector.empty) ++
+    val message = Vector("role" -> js("assistant"), "content" -> js(f.reply.content)) ++
+      (if f.reply.reasoning.nonEmpty then Vector("reasoning_content" -> js(f.reply.reasoning)) else Vector.empty) ++
       (if f.reply.toolCalls.nonEmpty then Vector("tool_calls" -> toolCalls(id, f.reply.toolCalls)) else Vector.empty)
-    Json.obj("id" -> str(s"chatcmpl-$id"), "object" -> str("chat.completion"), "created" -> num(created),
-      "model" -> str(model), "choices" -> Json.arr(Json.obj("index" -> num(0), "message" -> Json.obj(message*),
-        "finish_reason" -> str(finishReason(f)))), "usage" -> usage(f))
+    Json.obj("id" -> js(s"chatcmpl-$id"), "object" -> js("chat.completion"), "created" -> jn(created),
+      "model" -> js(model), "choices" -> Json.arr(Json.obj("index" -> jn(0), "message" -> Json.obj(message*),
+        "finish_reason" -> js(finishReason(f)))), "usage" -> usage(f))
 
   def chunk(id: String, model: String, created: Long, delta: Json, finish: Option[String] = None,
       usage: Option[Json] = None): String =
-    val choices = if usage.isDefined then Json.arr() else Json.arr(Json.obj("index" -> num(0), "delta" -> delta,
-      "finish_reason" -> finish.map(str).getOrElse(Json.Null)))
-    val fields = Vector("id" -> str(s"chatcmpl-$id"), "object" -> str("chat.completion.chunk"),
-      "created" -> num(created), "model" -> str(model), "choices" -> choices) ++ usage.map("usage" -> _)
+    val choices = if usage.isDefined then Json.arr() else Json.arr(Json.obj("index" -> jn(0), "delta" -> delta,
+      "finish_reason" -> finish.map(js).getOrElse(Json.Null)))
+    val fields = Vector("id" -> js(s"chatcmpl-$id"), "object" -> js("chat.completion.chunk"),
+      "created" -> jn(created), "model" -> js(model), "choices" -> choices) ++ usage.map("usage" -> _)
     s"data: ${Json.obj(fields*).render}\n\n"
 
 /** ANTHROPIC'S MESSAGES: a request as an `Ask`, a turn as a message or as a stream's events */
 object Anthropic:
   def ask(body: Json): Ask =
     val system = body.get("system").map(text).filter(_.nonEmpty)
-      .map(s => Json.obj("role" -> str("system"), "content" -> str(s))).toVector
+      .map(s => Json.obj("role" -> js("system"), "content" -> js(s))).toVector
     val turns = body("messages").items.flatMap { m =>
       val role = m("role").str
       m("content") match
-        case Json.Str(s) => Vector(Json.obj("role" -> str(role), "content" -> str(s)))
+        case Json.Str(s) => Vector(Json.obj("role" -> js(role), "content" -> js(s)))
         case Json.Arr(blocks) =>
-          val texts = blocks.filter(_("type") == str("text")).map(_("text").str).mkString
-          val uses = blocks.filter(_("type") == str("tool_use"))
-          val results = blocks.filter(_("type") == str("tool_result"))
-            .map(r => Json.obj("role" -> str("tool"), "content" -> str(text(r("content")))))
+          val texts = blocks.filter(_("type") == js("text")).map(_("text").str).mkString
+          val uses = blocks.filter(_("type") == js("tool_use"))
+          val results = blocks.filter(_("type") == js("tool_result"))
+            .map(r => Json.obj("role" -> js("tool"), "content" -> js(text(r("content")))))
           val turn =
             if role == "assistant" && uses.nonEmpty then
-              Vector(Json.obj("role" -> str(role), "content" -> str(texts), "tool_calls" -> Json.Arr(uses.map(u =>
-                Json.obj("type" -> str("function"), "function" ->
+              Vector(Json.obj("role" -> js(role), "content" -> js(texts), "tool_calls" -> Json.Arr(uses.map(u =>
+                Json.obj("type" -> js("function"), "function" ->
                   Json.obj("name" -> u("name"), "arguments" -> u("input")))))))
             else if texts.nonEmpty || results.isEmpty then
-              Vector(Json.obj("role" -> str(role), "content" -> str(texts)))
+              Vector(Json.obj("role" -> js(role), "content" -> js(texts)))
             else Vector.empty
           results ++ turn
-        case other => Vector(Json.obj("role" -> str(role), "content" -> str(text(other))))
+        case other => Vector(Json.obj("role" -> js(role), "content" -> js(text(other))))
     }
-    val tools = body.get("tools").map(_.items).getOrElse(Vector.empty).map(t => Json.obj("type" -> str("function"),
-      "function" -> Json.obj("name" -> t("name"), "description" -> t.get("description").getOrElse(str("")),
+    val tools = body.get("tools").map(_.items).getOrElse(Vector.empty).map(t => Json.obj("type" -> js("function"),
+      "function" -> Json.obj("name" -> t("name"), "description" -> t.get("description").getOrElse(js("")),
         "parameters" -> t.get("input_schema").getOrElse(Json.obj()))))
-    val thinking = body.get("thinking").exists(_("type") == str("enabled"))
+    val thinking = body.get("thinking").exists(_("type") == js("enabled"))
     Ask(Ask.systemFirst(system ++ turns), tools, body.get("max_tokens").map(_.int).getOrElse(1024), thinking)
 
   def stopReason(f: Finished): String =
     if f.reply.toolCalls.nonEmpty then "tool_use" else if f.byStop then "end_turn" else "max_tokens"
 
   def toolUse(id: String, k: Int, c: ToolCall): Json =
-    Json.obj("type" -> str("tool_use"), "id" -> str(s"toolu_${id}_$k"), "name" -> str(c.name), "input" -> c.arguments)
+    Json.obj("type" -> js("tool_use"), "id" -> js(s"toolu_${id}_$k"), "name" -> js(c.name), "input" -> c.arguments)
 
   def message(id: String, model: String, f: Finished): Json =
     val content = (if f.reply.reasoning.nonEmpty then
-        Vector(Json.obj("type" -> str("thinking"), "thinking" -> str(f.reply.reasoning), "signature" -> str("")))
+        Vector(Json.obj("type" -> js("thinking"), "thinking" -> js(f.reply.reasoning), "signature" -> js("")))
       else Vector.empty) ++
       (if f.reply.content.nonEmpty || f.reply.toolCalls.isEmpty then
-        Vector(Json.obj("type" -> str("text"), "text" -> str(f.reply.content))) else Vector.empty) ++
+        Vector(Json.obj("type" -> js("text"), "text" -> js(f.reply.content))) else Vector.empty) ++
       f.reply.toolCalls.zipWithIndex.map((c, k) => toolUse(id, k, c))
-    Json.obj("id" -> str(s"msg_$id"), "type" -> str("message"), "role" -> str("assistant"), "model" -> str(model),
-      "content" -> Json.Arr(content), "stop_reason" -> str(stopReason(f)), "stop_sequence" -> Json.Null,
-      "usage" -> Json.obj("input_tokens" -> num(f.timing.promptTokens), "output_tokens" -> num(f.timing.tokens)))
+    Json.obj("id" -> js(s"msg_$id"), "type" -> js("message"), "role" -> js("assistant"), "model" -> js(model),
+      "content" -> Json.Arr(content), "stop_reason" -> js(stopReason(f)), "stop_sequence" -> Json.Null,
+      "usage" -> Json.obj("input_tokens" -> jn(f.timing.promptTokens), "output_tokens" -> jn(f.timing.tokens)))
 
   def event(name: String, data: Json): String = s"event: $name\ndata: ${data.render}\n\n"

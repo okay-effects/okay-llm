@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 import java.io.{BufferedInputStream, InputStream, OutputStream}
 import java.net.{InetAddress, ServerSocket}
 
@@ -18,19 +20,13 @@ object Server:
           try serve(req, out)
           catch case e: Throwable =>
             System.err.println(s"${req.method} ${req.path}: $e")
-            val body = s"""{"error":{"type":"api_error","message":${Quote(e.toString)}}}"""
+            val body = s"""{"error":{"type":"api_error","message":${quoteJson(e.toString)}}}"""
             try out.write((s"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n" +
               s"Content-Length: ${body.getBytes("UTF-8").length}\r\nConnection: close\r\n\r\n$body").getBytes("UTF-8"))
             catch case _: java.io.IOException => ()
         }
       catch case e: java.io.IOException => System.err.println(s"connection: $e")
       finally socket.close()
-
-  private object Quote:
-    def apply(s: String): String =
-      val sb = new java.lang.StringBuilder
-      okay.llm.Json.quote(s, sb)
-      sb.toString
 
   /** a request: its line, headers, and body — by Content-Length, or chunked */
   def read(in: InputStream): Option[Request] =

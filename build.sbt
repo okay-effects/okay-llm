@@ -7,7 +7,8 @@ ThisBuild / scalaVersion := "3.3.8"
 ThisBuild / organization := "io.github.okay-effects"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
-ThisBuild / resolvers += "okay-scala" at "https://okay-effects.github.io/okay-scala/maven"
+ThisBuild / resolvers ++= Seq("okay-scala" at "https://okay-effects.github.io/okay-scala/maven",
+  "okay-simple" at "https://okay-effects.github.io/okay-simple/maven")
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0.txt"))
 ThisBuild / homepage := Some(url("https://github.com/okay-effects/okay-llm"))
 
@@ -15,6 +16,7 @@ ThisBuild / homepage := Some(url("https://github.com/okay-effects/okay-llm"))
 lazy val core = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Pure).in(file("core"))
   .settings(name := "okay-llm",
     libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-scala" % "0.1.1",
+      "io.github.okay-effects" %%% "okay-effects-json" % "0.1.1",
       "org.scalameta" %%% "munit" % "1.2.3" % Test))
 
 lazy val root = (project in file(".")).aggregate(core.componentProjects.map(p => p: ProjectReference): _*)

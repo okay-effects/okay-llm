@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 /** A TOOL CALLED: its name and its arguments, a JSON object */
 final case class ToolCall(name: String, arguments: Json)
 
@@ -48,12 +50,12 @@ object Reply:
         if value.endsWith("\n") then value = value.dropRight(1)
         params += pName -> typed(value, schema(pName)("type"))
         at = if close < 0 then -1 else body.indexOf("<parameter=", close)
-      Some(ToolCall(name, Json.Obj(scala.collection.immutable.VectorMap.from(params.result()))))
+      Some(ToolCall(name, Json.Obj(params.result())))
     else
       try
-        val j = Json.parse(body)
+        val j = parseJson(body)
         val args = j("arguments") match
-          case Json.Str(s) => try Json.parse(s) catch case _: IllegalArgumentException => Json.Str(s)
+          case Json.Str(s) => try parseJson(s) catch case _: IllegalArgumentException => Json.Str(s)
           case Json.Null => Json.obj()
           case a => a
         Some(ToolCall(j("name").str, args))
@@ -62,5 +64,5 @@ object Reply:
   private def typed(value: String, kind: Json): Json = kind match
     case Json.Str("string") => Json.Str(value)
     case _ =>
-      try Json.parse(value.trim)
+      try parseJson(value.trim)
       catch case _: IllegalArgumentException => Json.Str(value)

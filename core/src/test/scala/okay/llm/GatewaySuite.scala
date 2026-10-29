@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 import okay.scala3.*
 import okay.scala3.std.*
 
@@ -16,7 +18,7 @@ class GatewaySuite extends munit.FunSuite:
     resp
   private def events(body: String): Vector[Json] =
     body.split("\n\n").toVector.flatMap(_.linesIterator.find(_.startsWith("data: ")).map(_.drop(6)))
-      .filter(_ != "[DONE]").map(Json.parse)
+      .filter(_ != "[DONE]").map(parseJson)
 
   private val chat = """{"model": "m", "messages": [{"role": "user", "content": "Capital of France?"}]}"""
   private val weather = """{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object",
@@ -27,7 +29,7 @@ class GatewaySuite extends munit.FunSuite:
   test("OpenAI: a whole response"):
     val (status, _, body) = call("POST", "/v1/chat/completions", chat)
     assertEquals(status, 200)
-    val j = Json.parse(body)
+    val j = parseJson(body)
     assertEquals(j("choices").items.head("message")("content").str, "The capital is Paris.")
     assertEquals(j("choices").items.head("finish_reason").str, "stop")
     assertEquals(j("object").str, "chat.completion")
@@ -45,12 +47,12 @@ class GatewaySuite extends munit.FunSuite:
 
   test("OpenAI: a tool called"):
     val req = chat.dropRight(1) + s""", "tools": [$weather]}"""
-    val j = Json.parse(call("POST", "/v1/chat/completions", req, toolAnswer)._3)
+    val j = parseJson(call("POST", "/v1/chat/completions", req, toolAnswer)._3)
     val choice = j("choices").items.head
     assertEquals(choice("finish_reason").str, "tool_calls")
     assertEquals(choice("message")("content").str, "Checking.")
     val f = choice("message")("tool_calls").items.head("function")
-    assertEquals((f("name").str, Json.parse(f("arguments").str)), ("get_weather", Json.parse("""{"city":"Paris"}""")))
+    assertEquals((f("name").str, parseJson(f("arguments").str)), ("get_weather", parseJson("""{"city":"Paris"}""")))
     // streamed: the text before the call, then the call, the reason
     val es = events(call("POST", "/v1/chat/completions", req.dropRight(1) + """, "stream": true}""", toolAnswer)._3)
     val deltas = es.flatMap(_("choices").items.headOption).map(_("delta"))
@@ -60,14 +62,14 @@ class GatewaySuite extends munit.FunSuite:
   test("Anthropic: a whole message, and a tool used"):
     val req = """{"model": "m", "max_tokens": 64, "system": "Be brief.",
       "messages": [{"role": "user", "content": [{"type": "text", "text": "Capital of France?"}]}]}"""
-    val m = Json.parse(call("POST", "/v1/messages", req)._3)
+    val m = parseJson(call("POST", "/v1/messages", req)._3)
     assertEquals(m("content").items.map(b => b("type").str -> b("text").str), Vector("text" -> "The capital is Paris."))
     assertEquals(m("stop_reason").str, "end_turn")
-    val t = Json.parse(call("POST", "/v1/messages", req.dropRight(1) +
+    val t = parseJson(call("POST", "/v1/messages", req.dropRight(1) +
       """, "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]}""", toolAnswer)._3)
     assertEquals(t("stop_reason").str, "tool_use")
     assertEquals(t("content").items.map(_("type").str), Vector("text", "tool_use"))
-    assertEquals(t("content").items(1)("input"), Json.parse("""{"city":"Paris"}"""))
+    assertEquals(t("content").items(1)("input"), parseJson("""{"city":"Paris"}"""))
 
   test("Anthropic: a stream's events in order, thinking in its own block"):
     val req = """{"model": "m", "max_tokens": 64, "stream": true, "thinking": {"type": "enabled"},
@@ -82,9 +84,9 @@ class GatewaySuite extends munit.FunSuite:
     assertEquals(text.map(_("delta")("text").str).mkString, "Paris it is.")
 
   test("count_tokens, models, errors"):
-    assert(Json.parse(call("POST", "/v1/messages/count_tokens",
+    assert(parseJson(call("POST", "/v1/messages/count_tokens",
       """{"model": "m", "messages": [{"role": "user", "content": "hello there"}]}""")._3)("input_tokens").int > 0)
-    assertEquals(Json.parse(call("GET", "/v1/models", "")._3)("data").items.head("id").str, "fake")
+    assertEquals(parseJson(call("GET", "/v1/models", "")._3)("data").items.head("id").str, "fake")
     assertEquals(call("POST", "/v1/chat/completions", "{not json")._1, 400)
     assertEquals(call("GET", "/nowhere", "")._1, 404)
 
@@ -96,7 +98,7 @@ class GatewaySuite extends munit.FunSuite:
     assertEquals((thinking, text), ("thinking hard", "answer"))
 
   test("system messages mid-conversation go first, as one"):
-    val a = Anthropic.ask(Json.parse("""{"max_tokens": 8, "system": [{"type": "text", "text": "You are helpful."}],
+    val a = Anthropic.ask(parseJson("""{"max_tokens": 8, "system": [{"type": "text", "text": "You are helpful."}],
       "messages": [{"role": "user", "content": "hi"}, {"role": "system", "content": [{"type": "text",
       "text": "# Environment"}]}, {"role": "assistant", "content": "hello"}]}"""))
     assertEquals(a.messages.map(m => m("role").str -> m("content").str), Vector(

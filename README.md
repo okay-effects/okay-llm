@@ -3,7 +3,7 @@
 Language models as effects ([okay-scala](https://github.com/okay-effects/okay-scala)), on no hardware in particular:
 the model is an effect, `Llm`, and what answers it is a module of its own — [okay-mlx](https://github.com/okay-effects/okay-mlx)
 on Apple's MLX; another backend is another module. On it: a gateway speaking OpenAI's and Anthropic's APIs, and the
-programs ask and bench. The JVM and Scala Native.
+programs ask and bench. The JVM and Scala Native; JSON is okay-simple's (okay-effects-json).
 
 ```scala
 def ask[R[_]: Has[Llm] : Has[Console]](question: String, maxTokens: Int): Finished ! R =

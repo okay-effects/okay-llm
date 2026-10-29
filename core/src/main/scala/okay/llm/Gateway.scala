@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 import okay.scala3.*
 import okay.scala3.std.*
 
@@ -9,11 +11,11 @@ import Streamer.Part
  * the response (`Http`), ids (`Clock`, `Fresh`), the log. Whole responses and streams (server-sent events) */
 object Gateway:
   private def s(x: String): Json = Json.Str(x)
-  private def n(x: Long): Json = Json.Num(x.toDouble)
+  private def n(x: Long): Json = Json.num(x)
 
   def route[R[_]: Has[Llm] : Has[Http] : Has[Clock] : Has[Fresh] : Has[Log]](req: Request): Unit ! R =
     def body: Either[String, Json] =
-      try Right(Json.parse(req.body)) catch case e: RuntimeException => Left(e.getMessage)
+      try Right(parseJson(req.body)) catch case e: RuntimeException => Left(e.getMessage)
     def bad(message: String): Unit ! R =
       Http.json(400, Json.obj("error" -> Json.obj("type" -> s("invalid_request_error"), "message" -> s(message))))
     val path = req.path.takeWhile(_ != '?')

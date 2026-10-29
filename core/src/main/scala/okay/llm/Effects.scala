@@ -1,5 +1,7 @@
 package okay.llm
 
+import okay.effects.json.Json
+
 import java.nio.file.{Files as NioFiles, Path}
 import scala.collection.mutable
 import okay.scala3.*
@@ -95,8 +97,8 @@ object Llm:
     def name = "fake"
     private def lastText(ask: Ask) =
       ask.messages.lastOption.map(_("content")).collect { case Json.Str(s) => s }.getOrElse("")
-    def count(ask: Ask) = ask.messages.map(m => m("content") match { case Json.Str(s) => s.length / 4 + 4; case _ => 4 })
-      .sum
+    def count(ask: Ask) =
+      ask.messages.map(m => m("content") match { case Json.Str(s) => s.length / 4 + 4; case _ => 4 }).sum
     def start(ask: Ask) = new Generation:
       private var rest = words(answer(lastText(ask)))
       private val sb = new StringBuilder
