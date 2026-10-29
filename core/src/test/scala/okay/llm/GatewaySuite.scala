@@ -18,7 +18,7 @@ class GatewaySuite extends munit.FunSuite:
     resp
   private def events(body: String): Vector[Json] =
     body.split("\n\n").toVector.flatMap(_.linesIterator.find(_.startsWith("data: ")).map(_.drop(6)))
-      .filter(_ != "[DONE]").map(parseJson)
+      .filter(_ != "[DONE]").map(Json.fromText)
 
   private val chat = """{"model": "m", "messages": [{"role": "user", "content": "Capital of France?"}]}"""
   private val weather = """{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object",
@@ -29,64 +29,64 @@ class GatewaySuite extends munit.FunSuite:
   test("OpenAI: a whole response"):
     val (status, _, body) = call("POST", "/v1/chat/completions", chat)
     assertEquals(status, 200)
-    val j = parseJson(body)
-    assertEquals(j("choices").items.head("message")("content").str, "The capital is Paris.")
-    assertEquals(j("choices").items.head("finish_reason").str, "stop")
-    assertEquals(j("object").str, "chat.completion")
+    val j = Json.fromText(body)
+    assertEquals(j("choices").list.head("message")("content").string, "The capital is Paris.")
+    assertEquals(j("choices").list.head("finish_reason").string, "stop")
+    assertEquals(j("object").string, "chat.completion")
 
   test("OpenAI: a stream, its deltas the answer, [DONE] last"):
     val (status, kind, body) = call("POST", "/v1/chat/completions",
       chat.dropRight(1) + """, "stream": true, "stream_options": {"include_usage": true}}""")
     assertEquals((status, kind), (200, "text/event-stream"))
     val es = events(body)
-    val text = es.flatMap(_("choices").items.headOption).flatMap(_("delta").get("content")).map(_.str).mkString
+    val text = es.flatMap(_("choices").list.headOption).flatMap(_("delta").field("content")).map(_.string).mkString
     assertEquals(text, "The capital is Paris.")
-    assertEquals(es.flatMap(_("choices").items.headOption).flatMap(_.get("finish_reason")).map(_.str), Vector("stop"))
-    assert(es.last.get("usage").isDefined)
+    assertEquals(es.flatMap(_("choices").list.headOption).flatMap(_.field("finish_reason")).map(_.string), Vector("stop"))
+    assert(es.last.field("usage").isDefined)
     assert(body.endsWith("data: [DONE]\n\n"))
 
   test("OpenAI: a tool called"):
     val req = chat.dropRight(1) + s""", "tools": [$weather]}"""
-    val j = parseJson(call("POST", "/v1/chat/completions", req, toolAnswer)._3)
-    val choice = j("choices").items.head
-    assertEquals(choice("finish_reason").str, "tool_calls")
-    assertEquals(choice("message")("content").str, "Checking.")
-    val f = choice("message")("tool_calls").items.head("function")
-    assertEquals((f("name").str, parseJson(f("arguments").str)), ("get_weather", parseJson("""{"city":"Paris"}""")))
+    val j = Json.fromText(call("POST", "/v1/chat/completions", req, toolAnswer)._3)
+    val choice = j("choices").list.head
+    assertEquals(choice("finish_reason").string, "tool_calls")
+    assertEquals(choice("message")("content").string, "Checking.")
+    val f = choice("message")("tool_calls").list.head("function")
+    assertEquals((f("name").string, Json.fromText(f("arguments").string)), ("get_weather", Json.fromText("""{"city":"Paris"}""")))
     // streamed: the text before the call, then the call, the reason
     val es = events(call("POST", "/v1/chat/completions", req.dropRight(1) + """, "stream": true}""", toolAnswer)._3)
-    val deltas = es.flatMap(_("choices").items.headOption).map(_("delta"))
-    assertEquals(deltas.flatMap(_.get("content")).map(_.str).mkString, "Checking. ")
-    assert(deltas.exists(_.get("tool_calls").isDefined))
+    val deltas = es.flatMap(_("choices").list.headOption).map(_("delta"))
+    assertEquals(deltas.flatMap(_.field("content")).map(_.string).mkString, "Checking. ")
+    assert(deltas.exists(_.field("tool_calls").isDefined))
 
   test("Anthropic: a whole message, and a tool used"):
     val req = """{"model": "m", "max_tokens": 64, "system": "Be brief.",
       "messages": [{"role": "user", "content": [{"type": "text", "text": "Capital of France?"}]}]}"""
-    val m = parseJson(call("POST", "/v1/messages", req)._3)
-    assertEquals(m("content").items.map(b => b("type").str -> b("text").str), Vector("text" -> "The capital is Paris."))
-    assertEquals(m("stop_reason").str, "end_turn")
-    val t = parseJson(call("POST", "/v1/messages", req.dropRight(1) +
+    val m = Json.fromText(call("POST", "/v1/messages", req)._3)
+    assertEquals(m("content").list.map(b => b("type").string -> b("text").string), Vector("text" -> "The capital is Paris."))
+    assertEquals(m("stop_reason").string, "end_turn")
+    val t = Json.fromText(call("POST", "/v1/messages", req.dropRight(1) +
       """, "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]}""", toolAnswer)._3)
-    assertEquals(t("stop_reason").str, "tool_use")
-    assertEquals(t("content").items.map(_("type").str), Vector("text", "tool_use"))
-    assertEquals(t("content").items(1)("input"), parseJson("""{"city":"Paris"}"""))
+    assertEquals(t("stop_reason").string, "tool_use")
+    assertEquals(t("content").list.map(_("type").string), Vector("text", "tool_use"))
+    assertEquals(t("content").list(1)("input"), Json.fromText("""{"city":"Paris"}"""))
 
   test("Anthropic: a stream's events in order, thinking in its own block"):
     val req = """{"model": "m", "max_tokens": 64, "stream": true, "thinking": {"type": "enabled"},
       "messages": [{"role": "user", "content": "Capital?"}]}"""
     val es = events(call("POST", "/v1/messages", req, "Hm, France. </think>\n\nParis it is.")._3)
-    assertEquals(es.map(_("type").str), Vector("message_start", "content_block_start", "content_block_delta",
+    assertEquals(es.map(_("type").string), Vector("message_start", "content_block_start", "content_block_delta",
       "content_block_delta", "content_block_stop", "content_block_start", "content_block_delta",
       "content_block_delta", "content_block_delta", "content_block_stop", "message_delta", "message_stop"))
-    val thinking = es.filter(e => e.get("delta").exists(_("type") == Json.Str("thinking_delta")))
-    assertEquals(thinking.map(_("delta")("thinking").str).mkString, "Hm, France. ")
-    val text = es.filter(e => e.get("delta").exists(_("type") == Json.Str("text_delta")))
-    assertEquals(text.map(_("delta")("text").str).mkString, "Paris it is.")
+    val thinking = es.filter(e => e.field("delta").exists(_("type") == Json.Str("thinking_delta")))
+    assertEquals(thinking.map(_("delta")("thinking").string).mkString, "Hm, France. ")
+    val text = es.filter(e => e.field("delta").exists(_("type") == Json.Str("text_delta")))
+    assertEquals(text.map(_("delta")("text").string).mkString, "Paris it is.")
 
   test("count_tokens, models, errors"):
-    assert(parseJson(call("POST", "/v1/messages/count_tokens",
+    assert(Json.fromText(call("POST", "/v1/messages/count_tokens",
       """{"model": "m", "messages": [{"role": "user", "content": "hello there"}]}""")._3)("input_tokens").int > 0)
-    assertEquals(parseJson(call("GET", "/v1/models", "")._3)("data").items.head("id").str, "fake")
+    assertEquals(Json.fromText(call("GET", "/v1/models", "")._3)("data").list.head("id").string, "fake")
     assertEquals(call("POST", "/v1/chat/completions", "{not json")._1, 400)
     assertEquals(call("GET", "/nowhere", "")._1, 404)
 
@@ -98,8 +98,8 @@ class GatewaySuite extends munit.FunSuite:
     assertEquals((thinking, text), ("thinking hard", "answer"))
 
   test("system messages mid-conversation go first, as one"):
-    val a = Anthropic.ask(parseJson("""{"max_tokens": 8, "system": [{"type": "text", "text": "You are helpful."}],
+    val a = Anthropic.ask(Json.fromText("""{"max_tokens": 8, "system": [{"type": "text", "text": "You are helpful."}],
       "messages": [{"role": "user", "content": "hi"}, {"role": "system", "content": [{"type": "text",
       "text": "# Environment"}]}, {"role": "assistant", "content": "hello"}]}"""))
-    assertEquals(a.messages.map(m => m("role").str -> m("content").str), Vector(
+    assertEquals(a.messages.map(m => m("role").string -> m("content").string), Vector(
       "system" -> "You are helpful.\n\n# Environment", "user" -> "hi", "assistant" -> "hello"))

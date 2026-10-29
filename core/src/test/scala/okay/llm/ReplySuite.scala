@@ -3,7 +3,7 @@ package okay.llm
 import okay.effects.json.Json
 
 class ReplySuite extends munit.FunSuite:
-  private val weather = parseJson("""{"type": "function", "function": {"name": "get_weather", "parameters":
+  private val weather = Json.fromText("""{"type": "function", "function": {"name": "get_weather", "parameters":
     {"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer"}}}}}""")
 
   test("text alone; thinking apart"):
@@ -24,4 +24,4 @@ class ReplySuite extends munit.FunSuite:
     val r = Reply.parse("<tool_call>\n<function=get_weather>\n<parameter=city>\nNew York\n</parameter>\n" +
       "<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>", tools = Seq(weather))
     assertEquals(r.content, "")
-    assertEquals(r.toolCalls, Vector(ToolCall("get_weather", parseJson("""{"city": "New York", "days": 3}"""))))
+    assertEquals(r.toolCalls, Vector(ToolCall("get_weather", Json.fromText("""{"city": "New York", "days": 3}"""))))

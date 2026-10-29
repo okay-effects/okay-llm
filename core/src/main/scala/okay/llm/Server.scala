@@ -20,7 +20,7 @@ object Server:
           try serve(req, out)
           catch case e: Throwable =>
             System.err.println(s"${req.method} ${req.path}: $e")
-            val body = s"""{"error":{"type":"api_error","message":${quoteJson(e.toString)}}}"""
+            val body = s"""{"error":{"type":"api_error","message":${Json.quote(e.toString)}}}"""
             try out.write((s"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n" +
               s"Content-Length: ${body.getBytes("UTF-8").length}\r\nConnection: close\r\n\r\n$body").getBytes("UTF-8"))
             catch case _: java.io.IOException => ()

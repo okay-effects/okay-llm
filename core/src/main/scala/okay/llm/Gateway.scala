@@ -15,7 +15,7 @@ object Gateway:
 
   def route[R[_]: Has[Llm] : Has[Http] : Has[Clock] : Has[Fresh] : Has[Log]](req: Request): Unit ! R =
     def body: Either[String, Json] =
-      try Right(parseJson(req.body)) catch case e: RuntimeException => Left(e.getMessage)
+      try Right(Json.fromText(req.body)) catch case e: RuntimeException => Left(e.getMessage)
     def bad(message: String): Unit ! R =
       Http.json(400, Json.obj("error" -> Json.obj("type" -> s("invalid_request_error"), "message" -> s(message))))
     val path = req.path.takeWhile(_ != '?')
@@ -54,8 +54,8 @@ object Gateway:
 
   def openAi[R[_]: Has[Llm] : Has[Http] : Has[Clock] : Has[Fresh] : Has[Log]](body: Json): Unit ! R =
     val ask = OpenAi.ask(body)
-    val stream = body.get("stream").contains(Json.Bool(true))
-    val withUsage = body.get("stream_options").flatMap(_.get("include_usage")).contains(Json.Bool(true))
+    val stream = body.field("stream").contains(Json.Bool(true))
+    val withUsage = body.field("stream_options").flatMap(_.field("include_usage")).contains(Json.Bool(true))
     for
       ids <- ident
       (id, created) = ids
@@ -93,7 +93,7 @@ object Gateway:
 
   def anthropic[R[_]: Has[Llm] : Has[Http] : Has[Clock] : Has[Fresh] : Has[Log]](body: Json): Unit ! R =
     val ask = Anthropic.ask(body)
-    val stream = body.get("stream").contains(Json.Bool(true))
+    val stream = body.field("stream").contains(Json.Bool(true))
     for
       ids <- ident
       id = ids._1

@@ -79,7 +79,7 @@ object Streamer:
 /** content as text: a string, or parts' texts joined */
 private def text(c: Json): String = c match
   case Json.Str(s) => s
-  case Json.Arr(parts) => parts.flatMap(p => p.get("text").collect { case Json.Str(t) => t }).mkString
+  case Json.Arr(parts) => parts.flatMap(p => p.field("text").collect { case Json.Str(t) => t }).mkString
   case Json.Null => ""
   case other => other.render
 
@@ -89,24 +89,24 @@ private def jn(n: Long): Json = Json.num(n)
 /** OPENAI'S CHAT COMPLETIONS: a request as an `Ask`, a turn as a response or as chunks of a stream */
 object OpenAi:
   def ask(body: Json): Ask =
-    val messages = body("messages").items.map { m =>
+    val messages = body("messages").list.map { m =>
       val fields = Vector.newBuilder[(String, Json)]
       fields += "role" -> m("role")
       fields += "content" -> js(text(m("content")))
-      m.get("tool_calls").foreach(calls => fields += "tool_calls" -> Json.Arr(calls.items.map { c =>
+      m.field("tool_calls").foreach(calls => fields += "tool_calls" -> Json.Arr(calls.list.map { c =>
         val f = c("function")
         val args = f("arguments") match
-          case Json.Str(s) => try parseJson(s) catch case _: IllegalArgumentException => Json.Str(s)
+          case Json.Str(s) => try Json.fromText(s) catch case _: IllegalArgumentException => Json.Str(s)
           case a => a
         Json.obj("type" -> js("function"), "function" -> Json.obj("name" -> f("name"), "arguments" -> args))
       }))
-      m.get("reasoning_content").foreach(r => fields += "reasoning_content" -> r)
+      m.field("reasoning_content").foreach(r => fields += "reasoning_content" -> r)
       Json.obj(fields.result()*)
     }
-    val max = body.get("max_completion_tokens").orElse(body.get("max_tokens")).map(_.int).getOrElse(1024)
-    val thinking = body.get("chat_template_kwargs").flatMap(_.get("enable_thinking")).exists(_ == Json.Bool(true)) ||
-      body.get("reasoning_effort").isDefined
-    Ask(Ask.systemFirst(messages), body.get("tools").map(_.items).getOrElse(Vector.empty), max, thinking)
+    val max = body.field("max_completion_tokens").orElse(body.field("max_tokens")).map(_.int).getOrElse(1024)
+    val thinking = body.field("chat_template_kwargs").flatMap(_.field("enable_thinking")).exists(_ == Json.Bool(true)) ||
+      body.field("reasoning_effort").isDefined
+    Ask(Ask.systemFirst(messages), body.field("tools").map(_.list).getOrElse(Vector.empty), max, thinking)
 
   def finishReason(f: Finished): String =
     if f.reply.toolCalls.nonEmpty then "tool_calls" else if f.byStop then "stop" else "length"
@@ -138,14 +138,14 @@ object OpenAi:
 /** ANTHROPIC'S MESSAGES: a request as an `Ask`, a turn as a message or as a stream's events */
 object Anthropic:
   def ask(body: Json): Ask =
-    val system = body.get("system").map(text).filter(_.nonEmpty)
+    val system = body.field("system").map(text).filter(_.nonEmpty)
       .map(s => Json.obj("role" -> js("system"), "content" -> js(s))).toVector
-    val turns = body("messages").items.flatMap { m =>
-      val role = m("role").str
+    val turns = body("messages").list.flatMap { m =>
+      val role = m("role").string
       m("content") match
         case Json.Str(s) => Vector(Json.obj("role" -> js(role), "content" -> js(s)))
         case Json.Arr(blocks) =>
-          val texts = blocks.filter(_("type") == js("text")).map(_("text").str).mkString
+          val texts = blocks.filter(_("type") == js("text")).map(_("text").string).mkString
           val uses = blocks.filter(_("type") == js("tool_use"))
           val results = blocks.filter(_("type") == js("tool_result"))
             .map(r => Json.obj("role" -> js("tool"), "content" -> js(text(r("content")))))
@@ -160,11 +160,11 @@ object Anthropic:
           results ++ turn
         case other => Vector(Json.obj("role" -> js(role), "content" -> js(text(other))))
     }
-    val tools = body.get("tools").map(_.items).getOrElse(Vector.empty).map(t => Json.obj("type" -> js("function"),
-      "function" -> Json.obj("name" -> t("name"), "description" -> t.get("description").getOrElse(js("")),
-        "parameters" -> t.get("input_schema").getOrElse(Json.obj()))))
-    val thinking = body.get("thinking").exists(_("type") == js("enabled"))
-    Ask(Ask.systemFirst(system ++ turns), tools, body.get("max_tokens").map(_.int).getOrElse(1024), thinking)
+    val tools = body.field("tools").map(_.list).getOrElse(Vector.empty).map(t => Json.obj("type" -> js("function"),
+      "function" -> Json.obj("name" -> t("name"), "description" -> t.field("description").getOrElse(js("")),
+        "parameters" -> t.field("input_schema").getOrElse(Json.obj()))))
+    val thinking = body.field("thinking").exists(_("type") == js("enabled"))
+    Ask(Ask.systemFirst(system ++ turns), tools, body.field("max_tokens").map(_.int).getOrElse(1024), thinking)
 
   def stopReason(f: Finished): String =
     if f.reply.toolCalls.nonEmpty then "tool_use" else if f.byStop then "end_turn" else "max_tokens"

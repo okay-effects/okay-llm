@@ -36,8 +36,8 @@ object Reply:
     if body.startsWith("<function=") then
       val nameEnd = body.indexOf('>')
       val name = body.substring("<function=".length, nameEnd).trim
-      val schema = tools.map(t => t.get("function").getOrElse(t)).find(_("name") == Json.Str(name))
-        .map(t => t.get("parameters").orElse(t.get("input_schema")).getOrElse(Json.Null)("properties"))
+      val schema = tools.map(t => t.field("function").getOrElse(t)).find(_("name") == Json.Str(name))
+        .map(t => t.field("parameters").orElse(t.field("input_schema")).getOrElse(Json.Null)("properties"))
         .getOrElse(Json.Null)
       val params = Vector.newBuilder[(String, Json)]
       var at = body.indexOf("<parameter=", nameEnd)
@@ -53,16 +53,16 @@ object Reply:
       Some(ToolCall(name, Json.Obj(params.result())))
     else
       try
-        val j = parseJson(body)
+        val j = Json.fromText(body)
         val args = j("arguments") match
-          case Json.Str(s) => try parseJson(s) catch case _: IllegalArgumentException => Json.Str(s)
+          case Json.Str(s) => try Json.fromText(s) catch case _: IllegalArgumentException => Json.Str(s)
           case Json.Null => Json.obj()
           case a => a
-        Some(ToolCall(j("name").str, args))
+        Some(ToolCall(j("name").string, args))
       catch case _: RuntimeException => None
 
   private def typed(value: String, kind: Json): Json = kind match
     case Json.Str("string") => Json.Str(value)
     case _ =>
-      try parseJson(value.trim)
+      try Json.fromText(value.trim)
       catch case _: IllegalArgumentException => Json.Str(value)

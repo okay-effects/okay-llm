@@ -16,7 +16,7 @@ ThisBuild / homepage := Some(url("https://github.com/okay-effects/okay-llm"))
 lazy val core = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Pure).in(file("core"))
   .settings(name := "okay-llm",
     libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-scala" % "0.1.1",
-      "io.github.okay-effects" %%% "okay-effects-json" % "0.1.1",
+      "io.github.okay-effects" %%% "okay-effects-json-value" % "0.1.1",
       "org.scalameta" %%% "munit" % "1.2.3" % Test))
 
 lazy val root = (project in file(".")).aggregate(core.componentProjects.map(p => p: ProjectReference): _*)
