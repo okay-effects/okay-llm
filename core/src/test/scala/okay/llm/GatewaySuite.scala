@@ -89,7 +89,9 @@ class GatewaySuite extends munit.FunSuite:
   test("count_tokens, models, errors"):
     assert(Json.fromText(call("POST", "/v1/messages/count_tokens",
       """{"model": "m", "messages": [{"role": "user", "content": "hello there"}]}""")._3)("input_tokens").int > 0)
-    assertEquals(Json.fromText(call("GET", "/v1/models", "")._3)("data").list.head("id").string, "fake")
+    val models = Json.fromText(call("GET", "/v1/models", "")._3)("data").list.head
+    assertEquals(models("id").string, "fake")
+    assertEquals(models("display_name").string, "fake")   // Anthropic's list, as rozum reads it
     assertEquals(call("POST", "/v1/chat/completions", "{not json")._1, 400)
     assertEquals(call("GET", "/nowhere", "")._1, 404)
 
