@@ -25,10 +25,10 @@ object Gateway:
         case ("GET", "/" | "/health") => Http.json(200, Json.obj("status" -> s("ok")))
         case ("GET", "/v1/models") =>
           // both APIs' lists in one: OpenAI's (`object`, `owned_by`), Anthropic's (`type`, `display_name`, …)
-          Llm.name.flatMap(m => Http.json(200, Json.obj("object" -> s("list"), "data" -> Json.arr(
+          Llm.models.flatMap(ms => Http.json(200, Json.obj("object" -> s("list"), "data" -> Json.arr(ms.map(m =>
             Json.obj("id" -> s(m), "object" -> s("model"), "owned_by" -> s("okay-llm"), "type" -> s("model"),
-              "display_name" -> s(m), "created_at" -> s("1970-01-01T00:00:00Z"))),
-            "has_more" -> Json.Bool(false), "first_id" -> s(m), "last_id" -> s(m))))
+              "display_name" -> s(m), "created_at" -> s("1970-01-01T00:00:00Z")))*),
+            "has_more" -> Json.Bool(false), "first_id" -> s(ms.head), "last_id" -> s(ms.last))))
         case ("POST", "/v1/chat/completions") => body.fold(bad, b => openAi(b))
         case ("POST", "/v1/messages") => body.fold(bad, b => anthropic(b))
         case ("POST", "/v1/messages/count_tokens") =>

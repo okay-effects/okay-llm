@@ -122,3 +122,7 @@ class GatewaySuite extends munit.FunSuite:
       Sampling(None, None, Some(20), None))
     assertEquals(OpenAi.ask(Json.fromText("""{"messages": [], "presence_penalty": 1.5}""")).sampling,
       Sampling(presencePenalty = Some(1.5)))
+
+  test("the model a request names, for a backend of several"):
+    assertEquals(Anthropic.ask(Json.fromText("""{"model": "a/b", "messages": []}""")).model, Some("a/b"))
+    assertEquals(OpenAi.ask(Json.fromText("""{"messages": []}""")).model, None)

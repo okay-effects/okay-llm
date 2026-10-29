@@ -108,7 +108,7 @@ object OpenAi:
       body.field("chat_template_kwargs").flatMap(_.field("enable_thinking")).exists(_ == Json.Bool(true)) ||
       body.field("reasoning_effort").isDefined
     Ask(Ask.systemFirst(messages), body.field("tools").map(_.list).getOrElse(Vector.empty), max, thinking,
-      Sampling.of(body))
+      Sampling.of(body), body.field("model").map(_.string))
 
   def finishReason(f: Finished): String =
     if f.reply.toolCalls.nonEmpty then "tool_calls" else if f.byStop then "stop" else "length"
@@ -174,7 +174,7 @@ object Anthropic:
         "parameters" -> t.field("input_schema").getOrElse(Json.obj()))))
     val thinking = body.field("thinking").exists(_("type") == js("enabled"))
     Ask(Ask.systemFirst(system ++ turns), tools, body.field("max_tokens").map(_.int).getOrElse(1024), thinking,
-      Sampling.of(body))
+      Sampling.of(body), body.field("model").map(_.string))
 
   def stopReason(f: Finished): String =
     if f.reply.toolCalls.nonEmpty then "tool_use" else if f.byStop then "end_turn" else "max_tokens"

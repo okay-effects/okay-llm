@@ -8,9 +8,9 @@ import okay.scala3.*
 
 /** what is asked of a model: a conversation (messages as a chat template takes them: role, content, tool calls), the
  * tools it may call, how many tokens at most, whether it thinks first; how tokens are drawn — each unset, the
- * model's own (a backend's default) */
+ * model's own (a backend's default); the model the request names, if any (a backend of several picks by it) */
 final case class Ask(messages: Vector[Json], tools: Vector[Json] = Vector.empty, maxTokens: Int = 1024,
-    thinking: Boolean = false, sampling: Sampling = Sampling())
+    thinking: Boolean = false, sampling: Sampling = Sampling(), model: Option[String] = None)
 
 /** HOW TOKENS ARE DRAWN, as a request says: temperature (0: greedy), top_p, top_k, a seed, OpenAI's presence and
  * frequency penalties (against a loop); each unset, the backend's */
@@ -52,6 +52,7 @@ final case class Finished(reply: Reply, timing: Timing, byStop: Boolean)
  * piece, its end. Which model, on which hardware, is the handler's — a module of its own (okay-mlx: Apple's MLX) */
 enum Llm[X]:
   case Name() extends Llm[String]
+  case Models() extends Llm[Vector[String]]
   case Count(ask: Ask) extends Llm[Int]
   case Start(ask: Ask) extends Llm[Gen]
   case Next(gen: Gen) extends Llm[Option[String]]
@@ -59,6 +60,8 @@ enum Llm[X]:
 
 object Llm:
   def name[R[_]](using In[Llm, R]): String ! R = perform[Llm](Name())
+  /** the models it may answer by, the one it has now first */
+  def models[R[_]](using In[Llm, R]): Vector[String] ! R = perform[Llm](Models())
   def count[R[_]](ask: Ask)(using In[Llm, R]): Int ! R = perform[Llm](Count(ask))
   def start[R[_]](ask: Ask)(using In[Llm, R]): Gen ! R = perform[Llm](Start(ask))
   /** the next piece of text, or none: the generation is over */
@@ -77,6 +80,8 @@ object Llm:
    * pieces — and the handler made of it */
   trait Backend:
     def name: String
+    /** the models it may answer by, `name` first: a backend of one, that one */
+    def models: Vector[String] = Vector(name)
     def count(ask: Ask): Int
     def start(ask: Ask): Generation
   /** a generation going on: its pieces; at its end, its whole text and what it measured */
@@ -92,6 +97,7 @@ object Llm:
     var ids = 0L
     handle(p, Handler.tail[Llm, Rest, A, A](pure)([X] => (op: Llm[X]) => op match
       case Name() => backend.name
+      case Models() => backend.models
       case Count(ask) => backend.count(ask)
       case Start(ask) =>
         ids += 1
