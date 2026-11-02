@@ -8,7 +8,8 @@ Language models as okay-scala effects, hardware-neutral. One crossProject `core`
   (Qwen3 JSON, Qwen3.6 XML typed by the tool's schema). `JsonOps.scala`: okay-simple's JSON value (okay-effects-json-value, no dependency) read as an
   API's body is (`j("key")`, `.str`, `.items`, `parseJson`, `.render`).
   `Api.scala`: pure — `Streamer`, `OpenAi`, `Anthropic`. `Gateway.scala`: the routes as programs. `Server.scala`:
-  HTTP/1.1 on ServerSocket. `Programs.scala`: ask, bench.
+  HTTP/1.1 on ServerSocket. `AgUi.scala`: AG-UI 1.0's events (run, text, tool call, interrupt) as JSON and SSE, a
+  run's input (RunAgentInput, resume) — shared by okay-agent's server and okay-remote's sessions. `Programs.scala`: ask, bench.
 - No dependency on any hardware library: a backend converts to and from these types.
 - Scala Native's regex is RE2's (no look-around); no `java.time`.
 
