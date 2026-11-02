@@ -63,6 +63,9 @@ object Reply:
 
   private def typed(value: String, kind: Json): Json = kind match
     case Json.Str("string") => Json.Str(value)
+    // a boolean as Python writes it too: a model trained on Python says True
+    case Json.Str("boolean") if Set("true", "false")(value.trim.toLowerCase) =>
+      Json.Bool(value.trim.toLowerCase == "true")
     case _ =>
       try Json.fromText(value.trim)
       catch case _: IllegalArgumentException => Json.Str(value)

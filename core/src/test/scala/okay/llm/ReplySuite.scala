@@ -25,3 +25,11 @@ class ReplySuite extends munit.FunSuite:
       "<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>", tools = Seq(weather))
     assertEquals(r.content, "")
     assertEquals(r.toolCalls, Vector(ToolCall("get_weather", Json.fromText("""{"city": "New York", "days": 3}"""))))
+
+  test("a boolean as Python writes it: True, False — typed by the schema"):
+    val flag = Json.fromText("""{"type": "function", "function": {"name": "references", "parameters":
+      {"type": "object", "properties": {"query": {"type": "string"}, "callers": {"type": "boolean"}}}}}""")
+    val r = Reply.parse("<tool_call>\n<function=references>\n<parameter=query>\nAgent.run\n</parameter>\n" +
+      "<parameter=callers>\nTrue\n</parameter>\n</function>\n</tool_call>", tools = Seq(flag))
+    assertEquals(r.toolCalls, Vector(ToolCall("references",
+      Json.obj("query" -> Json.Str("Agent.run"), "callers" -> Json.Bool(true)))))
