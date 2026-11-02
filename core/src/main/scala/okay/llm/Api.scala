@@ -119,7 +119,8 @@ object OpenAi:
 
   def usage(f: Finished): Json =
     Json.obj("prompt_tokens" -> jn(f.timing.promptTokens), "completion_tokens" -> jn(f.timing.tokens),
-      "total_tokens" -> jn(f.timing.promptTokens + f.timing.tokens))
+      "total_tokens" -> jn(f.timing.promptTokens + f.timing.tokens),
+      "prompt_tokens_details" -> Json.obj("cached_tokens" -> jn(f.timing.cachedTokens)))
 
   def response(id: String, model: String, created: Long, f: Finished): Json =
     val message = Vector("role" -> js("assistant"), "content" -> js(f.reply.content)) ++

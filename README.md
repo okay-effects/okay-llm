@@ -26,6 +26,12 @@ resolvers ++= Seq("okay-llm" at "https://okay-effects.github.io/okay-llm/maven",
 libraryDependencies += "io.github.okay-effects" %%% "okay-llm" % "0.1.0"   // the JVM and Scala Native
 ```
 
+## A model behind a server
+
+`HttpBackend("http://127.0.0.1:8090/v1", "<model>")` is an `Llm.Backend` over the wire: any server speaking OpenAI's
+chat completions — okay-mlx's gateway, LM Studio, Ollama, vLLM. Streamed, its text piece by piece, its tool calls as
+the server read them, its usage (the cached tokens too, where the server tells). `http://` alone.
+
 ## A backend
 
 Hardware is a `Llm.Backend` — a prompt's size, and a generation as pieces of text — and `Llm.on(backend)` makes the

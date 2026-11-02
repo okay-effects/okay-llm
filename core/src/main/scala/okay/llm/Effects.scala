@@ -91,6 +91,8 @@ object Llm:
     def timing: Timing
     def byStop: Boolean
     def close(): Unit
+    /** the turn read: from the text (a model's own, here), or as a server read it already (`HttpBackend`) */
+    def reply(thinking: Boolean, tools: Seq[Json]): Reply = Reply.parse(text, thinking, tools)
 
   def on[R[_], Rest[_], A](backend: Backend)(p: A ! R)(using Split[Llm, R, Rest]): A ! Rest =
     val running = mutable.HashMap.empty[Long, (Generation, Ask)]
@@ -107,7 +109,7 @@ object Llm:
       case Finish(gen) =>
         val (g, ask) = running.remove(gen.id).get
         g.close()
-        Finished(Reply.parse(g.text, ask.thinking, ask.tools), g.timing, g.byStop)))
+        Finished(g.reply(ask.thinking, ask.tools), g.timing, g.byStop)))
 
   /** answers given by a function of the last message's text, piece by piece (by word), timings made up: the
    * programs without a model */
