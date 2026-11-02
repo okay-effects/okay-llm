@@ -26,12 +26,17 @@ object AgUi:
   def stepStarted(name: String): Json = event("STEP_STARTED", "stepName" -> s(name))
   def stepFinished(name: String): Json = event("STEP_FINISHED", "stepName" -> s(name))
 
+  /** a message of the model's streamed: its start, each piece (never empty), its end */
+  def textStart(messageId: String): Json = event("TEXT_MESSAGE_START", "messageId" -> s(messageId),
+    "role" -> s("assistant"))
+  def textContent(messageId: String, delta: String): Json = event("TEXT_MESSAGE_CONTENT",
+    "messageId" -> s(messageId), "delta" -> s(delta))
+  def textEnd(messageId: String): Json = event("TEXT_MESSAGE_END", "messageId" -> s(messageId))
+
   /** a message of the model's, whole: start, its text, end (a text never empty: AG-UI's content needs a delta) */
   def text(messageId: String, text: String): Vector[Json] =
     if text.isEmpty then Vector.empty
-    else Vector(event("TEXT_MESSAGE_START", "messageId" -> s(messageId), "role" -> s("assistant")),
-      event("TEXT_MESSAGE_CONTENT", "messageId" -> s(messageId), "delta" -> s(text)),
-      event("TEXT_MESSAGE_END", "messageId" -> s(messageId)))
+    else Vector(textStart(messageId), textContent(messageId, text), textEnd(messageId))
 
   /** a call the model made: start, its arguments (JSON text), end */
   def toolCall(id: String, name: String, args: Json, parent: Option[String] = None): Vector[Json] =
