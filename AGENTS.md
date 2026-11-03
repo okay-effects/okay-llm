@@ -1,6 +1,6 @@
 # okay-llm — notes for agents
 
-Language models as okay-scala effects, hardware-neutral. One crossProject `core` (JVM, Scala Native), package
+Language models as okay-scala effects, hardware-neutral. One crossProject `core` (JVM, Scala Native, Scala.js), package
 `okay.llm`. A backend (hardware) is a module of its own implementing `Llm.Backend` — okay-mlx is MLX's.
 
 - `Effects.scala`: `Ask` (+ `systemFirst`), `Gen`, `Timing`, `Finished`; `Llm` (`on(backend)`, `fake`), `Files`,

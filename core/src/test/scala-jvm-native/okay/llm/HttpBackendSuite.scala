@@ -54,3 +54,10 @@ class HttpBackendSuite extends munit.FunSuite:
     val f = run(Llm.on(backend)(Llm.complete[Llm](Ask(history, Vector(weather)))))
     assertEquals(f.reply.content, "Sunny.")
     assertEquals(f.reply.toolCalls, Vector.empty)
+
+  test("a format asked goes out as response_format; the old copy keeps it"):
+    val schema = Json.obj("type" -> Json.Str("json_schema"), "json_schema" -> Json.obj("name" -> Json.Str("a")))
+    val ask = Ask(Vector(Json.obj("role" -> Json.Str("user"), "content" -> Json.Str("?"))), format = Some(schema))
+    assertEquals(HttpBackend.body(ask, "m").field("response_format"), Some(schema))
+    assertEquals(ask.copy(ask.messages, ask.tools, 7, false, Sampling(), None).format, Some(schema))
+    assertEquals(HttpBackend.body(ask.copy(format = None), "m").field("response_format"), None)

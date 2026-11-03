@@ -108,7 +108,7 @@ object OpenAi:
       body.field("chat_template_kwargs").flatMap(_.field("enable_thinking")).exists(_ == Json.Bool(true)) ||
       body.field("reasoning_effort").isDefined
     Ask(Ask.systemFirst(messages), body.field("tools").map(_.list).getOrElse(Vector.empty), max, thinking,
-      Sampling.of(body), body.field("model").map(_.string))
+      Sampling.of(body), body.field("model").map(_.string), body.field("response_format"))
 
   def finishReason(f: Finished): String =
     if f.reply.toolCalls.nonEmpty then "tool_calls" else if f.byStop then "stop" else "length"

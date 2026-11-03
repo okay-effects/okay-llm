@@ -49,7 +49,8 @@ object HttpBackend:
       sampling.temperature.map("temperature" -> Json.num(_)) ++ sampling.topP.map("top_p" -> Json.num(_)) ++
       sampling.topK.map("top_k" -> Json.num(_)) ++ sampling.seed.map("seed" -> Json.num(_)) ++
       sampling.presencePenalty.map("presence_penalty" -> Json.num(_)) ++
-      sampling.frequencyPenalty.map("frequency_penalty" -> Json.num(_)))
+      sampling.frequencyPenalty.map("frequency_penalty" -> Json.num(_)) ++
+      ask.format.map("response_format" -> _))
 
   /** a response's body as lines: by its length, chunked, or to the connection's close */
   private final class Lines(in: InputStream, chunked: Boolean):

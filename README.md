@@ -3,7 +3,7 @@
 Language models as effects ([okay-scala](https://github.com/okay-effects/okay-scala)), on no hardware in particular:
 the model is an effect, `Llm`, and what answers it is a module of its own — [okay-mlx](https://github.com/okay-effects/okay-mlx)
 on Apple's MLX; another backend is another module. On it: a gateway speaking OpenAI's and Anthropic's APIs, and the
-programs ask and bench. The JVM and Scala Native; JSON is okay-simple's value alone
+programs ask and bench. The JVM and Scala Native, and Scala.js for the effects and the formats (no server, no files there); JSON is okay-simple's value alone
 (okay-effects-json-value, no dependency).
 
 ```scala
@@ -23,7 +23,7 @@ run(Console.collect(Llm.fake(_ => "Paris.")(ask[App]("Capital of France?", 16)))
 resolvers ++= Seq("okay-llm" at "https://okay-effects.github.io/okay-llm/maven",
   "okay-scala" at "https://okay-effects.github.io/okay-scala/maven",
   "okay-simple" at "https://okay-effects.github.io/okay-simple/maven")
-libraryDependencies += "io.github.okay-effects" %%% "okay-llm" % "0.1.0"   // the JVM and Scala Native
+libraryDependencies += "io.github.okay-effects" %%% "okay-llm" % "0.1.0"   // the JVM, Scala Native, Scala.js
 ```
 
 ## A model behind a server

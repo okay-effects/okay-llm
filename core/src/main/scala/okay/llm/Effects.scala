@@ -2,15 +2,23 @@ package okay.llm
 
 import okay.effects.json.Json
 
-import java.nio.file.{Files as NioFiles, Path}
 import scala.collection.mutable
 import okay.scala3.*
 
 /** what is asked of a model: a conversation (messages as a chat template takes them: role, content, tool calls), the
  * tools it may call, how many tokens at most, whether it thinks first; how tokens are drawn — each unset, the
- * model's own (a backend's default); the model the request names, if any (a backend of several picks by it) */
+ * model's own (a backend's default); the model the request names, if any (a backend of several picks by it); the
+ * answer's format, if one is asked (OpenAI's `response_format`: `{"type": "json_schema", "json_schema": {…}}` — a
+ * backend that cannot hold to it answers as it can) */
 final case class Ask(messages: Vector[Json], tools: Vector[Json] = Vector.empty, maxTokens: Int = 1024,
-    thinking: Boolean = false, sampling: Sampling = Sampling(), model: Option[String] = None)
+    thinking: Boolean = false, sampling: Sampling = Sampling(), model: Option[String] = None,
+    format: Option[Json] = None):
+  def copy(messages: Vector[Json] = messages, tools: Vector[Json] = tools, maxTokens: Int = maxTokens,
+      thinking: Boolean = thinking, sampling: Sampling = sampling, model: Option[String] = model,
+      format: Option[Json] = format): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, format)
+  /** the copy of the release before `format`: code built on it links (its format kept) */
+  def copy(messages: Vector[Json], tools: Vector[Json], maxTokens: Int, thinking: Boolean, sampling: Sampling,
+      model: Option[String]): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, format)
 
 /** HOW TOKENS ARE DRAWN, as a request says: temperature (0: greedy), top_p, top_k, a seed, OpenAI's presence and
  * frequency penalties (against a loop); each unset, the backend's */
@@ -25,6 +33,10 @@ object Sampling:
       body.field("frequency_penalty").map(_.double))
 
 object Ask:
+  /** the apply of the release before `format` (binary compatibility of code built on it) */
+  def apply(messages: Vector[Json], tools: Vector[Json], maxTokens: Int, thinking: Boolean, sampling: Sampling,
+      model: Option[String]): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, None)
+
   /** a system message where a chat template takes none — after the first message (Claude Code sends one each turn,
    * mid-conversation; Qwen3.6's template raises) — as a user message, where it is. Not moved to the first: the
    * prompt's beginning stays the same from turn to turn, and a cache of prefixes keeps it */
@@ -141,22 +153,6 @@ object Llm:
       for i <- s.indices if s.charAt(i) == ' ' do { out += s.substring(from, i + 1); from = i + 1 }
       if from < s.length then out += s.substring(from)
       out.result()
-
-/** FILES: a text read */
-enum Files[X]:
-  case Read(path: Path) extends Files[String]
-
-object Files:
-  def read[R[_]](path: Path)(using In[Files, R]): String ! R = perform[Files](Read(path))
-
-  def disk[R[_], Rest[_], A](p: A ! R)(using Split[Files, R, Rest]): A ! Rest =
-    handle(p, Handler.tail[Files, Rest, A, A](pure)([X] => (op: Files[X]) => op match
-      case Read(path) => NioFiles.readString(path)))
-
-  /** files given: a map of paths to texts */
-  def of[R[_], Rest[_], A](files: Map[Path, String])(p: A ! R)(using Split[Files, R, Rest]): A ! Rest =
-    handle(p, Handler.tail[Files, Rest, A, A](pure)([X] => (op: Files[X]) => op match
-      case Read(path) => files.getOrElse(path, throw java.io.FileNotFoundException(path.toString))))
 
 /** THE CONSOLE: a line out */
 enum Console[X]:
