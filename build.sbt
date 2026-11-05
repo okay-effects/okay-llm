@@ -36,10 +36,19 @@ lazy val core = crossProject(JVMPlatform, NativePlatform, JSPlatform).crossType(
   .jvmSettings(jvmNative)
   .nativeSettings(jvmNative)
 
-lazy val root = (project in file(".")).aggregate(core.componentProjects.map(p => p: ProjectReference): _*)
+lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects).map(p => p: ProjectReference): _*)
   .settings(publish / skip := true)
 
 /** the sources of the JVM and Scala Native, not of Scala.js: core/src/{main,test}/scala-jvm-native */
 lazy val jvmNative: Seq[Setting[_]] = Seq(
   Compile / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "src" / "main" / "scala-jvm-native",
   Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "src" / "test" / "scala-jvm-native")
+
+/** QWEN3 IN PLAIN SCALA (okay-desk specs/data.md §15): the model's file read (safetensors, MLX's 4-bit layout), the
+ * forward pass on the CPU — the reference every device handler is checked against — and the tokenizer (mlx-scala's
+ * byte-level BPE, the pre-tokenizer by hand); one code for the JVM and the browser. The WebGPU and WebGL2 handlers
+ * come as a Scala.js module beside it */
+lazy val qwen = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).in(file("qwen"))
+  .settings(name := "okay-llm-qwen",
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects-json-value" % "0.1.1",
+      "org.scalameta" %%% "munit" % "1.2.3" % Test))
