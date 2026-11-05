@@ -1,6 +1,7 @@
 package okay.llm.qwen
 
 import okay.effects.json.Json
+import okay.llm.compute.QLinear
 
 /**
  * SAFETENSORS READ IN PLAIN SCALA (the JVM and the browser alike): the header (8 bytes of length, JSON), then the
@@ -41,37 +42,6 @@ final class Safetensors(bytes: Array[Byte]):
   def linear(prefix: String): QLinear =
     val e = entries(prefix + ".weight")
     QLinear(e.shape(0), e.shape(1) * 8, words(prefix + ".weight"), floats(prefix + ".scales"), floats(prefix + ".biases"))
-
-/** a quantized linear: W [out, in] = scales · q + biases by groups of 64 along `in` */
-final case class QLinear(out: Int, in: Int, words: Array[Int], scales: Array[Float], biases: Array[Float]):
-    val groups: Int = in / 64
-    /** W[o][i] decoded */
-    def at(o: Int, i: Int): Float =
-      val word = words(o * (in / 8) + i / 8)
-      val q = (word >>> ((i % 8) * 4)) & 0xf
-      val g = o * groups + i / 64
-      scales(g) * q + biases(g)
-    /** y = W x for one vector x (length `in`): the row's groups decoded as they go */
-    def apply(x: Array[Float]): Array[Float] =
-      val y = new Array[Float](out)
-      val perRow = in / 8
-      var o = 0
-      while o < out do
-        var acc = 0f
-        var i = 0
-        while i < in do
-          val g = o * groups + i / 64
-          val s = scales(g); val bq = biases(g)
-          var k = 0
-          while k < 64 do
-            val word = words(o * perRow + (i + k) / 8)
-            val q = (word >>> (((i + k) % 8) * 4)) & 0xf
-            acc += (s * q + bq) * x(i + k)
-            k += 1
-          i += 64
-        y(o) = acc
-        o += 1
-      y
 
 object Safetensors:
   def halfToFloat(h: Int): Float =

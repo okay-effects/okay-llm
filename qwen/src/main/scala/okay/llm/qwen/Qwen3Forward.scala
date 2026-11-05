@@ -1,5 +1,7 @@
 package okay.llm.qwen
 
+import okay.llm.compute.QLinear
+
 /**
  * QWEN3'S FORWARD IN PLAIN SCALA (specs/data.md §15 step 2): the reference handler — one code for the JVM (the law
  * against mlx-scala) and the browser (the fallback under WebGPU and WebGL2). The model as `Cut` leaves it: the

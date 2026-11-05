@@ -36,7 +36,7 @@ lazy val core = crossProject(JVMPlatform, NativePlatform, JSPlatform).crossType(
   .jvmSettings(jvmNative)
   .nativeSettings(jvmNative)
 
-lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects).map(p => p: ProjectReference): _*)
+lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects).map(p => p: ProjectReference) :+ (browser: ProjectReference): _*)
   .settings(publish / skip := true)
 
 /** the sources of the JVM and Scala Native, not of Scala.js: core/src/{main,test}/scala-jvm-native */
@@ -52,3 +52,10 @@ lazy val qwen = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).
   .settings(name := "okay-llm-qwen",
     libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects-json-value" % "0.1.1",
       "org.scalameta" %%% "munit" % "1.2.3" % Test))
+  .jvmSettings(Test / fork := true, Test / javaOptions += "-Xmx4g")
+
+/** THE BROWSER'S DEVICES (BACKLOG "The browser engine"): `Compute` on WebGPU and on WebGL2, and the page's self-test
+ * (browser/index.html) — the forward on each against the CPU handler. `sbt browser/fullLinkJS`; scripts/selftest.scala */
+lazy val browser = project.in(file("browser")).enablePlugins(ScalaJSPlugin).dependsOn(qwen.js)
+  .settings(name := "okay-llm-qwen-browser", scalaJSUseMainModuleInitializer := true,
+    Compile / mainClass := Some("okay.llm.qwen.web.Selftest"))

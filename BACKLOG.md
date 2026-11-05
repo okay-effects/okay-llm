@@ -11,9 +11,10 @@ Reference below: FreeToken (github.com/FlashML-org/FreeToken, Apache-2.0, read a
 
 ## The browser engine (operator, 2026-11-05)
 
-- **`browser`** (Scala.js): a `Compute` layer of devices — WebGPU (WGSL compute) and WebGL2 (fragment shaders over
-  float textures, okay-go-game's way) with the plain-Scala CPU handler as the reference — buffers and textures,
-  dense and 4-bit matmul, elementwise, RMSNorm, RoPE, attention; Qwen3's forward on it (`qwen`), the hidden states
-  and the logits a skill needs (okay-desk specs/data.md §15). Law: the handlers equal each other and mlx-scala.
+- **DONE 2026-11-05**: `Compute` (qwen module, package okay.llm.compute) with `OnCpu`; `OnWebGpu` and `OnWebGl2` in the
+  `browser` module; `Qwen3Compute` the forward over it. Laws: `ComputeSuite` (OnCpu == Qwen3Forward, exact) and
+  scripts/selftest.sh (WebGPU diff 6e-5, WebGL2 8e-3 on states up to 7942; 16 tokens: CPU 11 s, WebGPU 0.1 s,
+  WebGL2 0.4 s on an M4 Max). Open: speed on long prompts (a thread per output element, no tiling; the scores
+  buffer n·heads·n), f16 where the device has it, the model fetched once into the browser cache.
 - **Shared with okay-go-game** (the operator): the same `Compute` layer runs the Go net too — a convolution added
   as one more op; the game's GpuNet / GlNet become clients of it rather than their own kernels.

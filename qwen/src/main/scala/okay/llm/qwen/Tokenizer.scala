@@ -140,6 +140,13 @@ object Tokenizer:
     whole
 
   // the regex's classes: Unicode letters, numbers, White_Space
+  /** the code points of a string (no `String.codePoints` on Scala.js) */
+  def codePoints(s: String): Array[Int] =
+    val out = scala.collection.mutable.ArrayBuilder.make[Int]
+    var i = 0
+    while i < s.length do { val c = s.codePointAt(i); out += c; i += Character.charCount(c) }
+    out.result()
+
   private def isL(c: Int): Boolean = Character.isLetter(c)
   private def isN(c: Int): Boolean =
     val t = Character.getType(c)
@@ -151,7 +158,7 @@ object Tokenizer:
 
   /** the text in the regex's pieces */
   def pretokenize(text: String): Vector[String] =
-    val cps = text.codePoints().toArray
+    val cps = Tokenizer.codePoints(text)
     val n = cps.length
     val out = Vector.newBuilder[String]
     def run(from: Int, p: Int => Boolean): Int = { var j = from; while j < n && p(cps(j)) do j += 1; j }
