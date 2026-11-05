@@ -8,13 +8,17 @@ import okay.llm.compute.QLinear
  * tensors' bytes. MLX's 4-bit layout: a linear's `weight` U32 [out, in / 8] (eight 4-bit values a word, the lowest
  * bits first), `scales` and `biases` BF16 [out, in / 64]; norms BF16 [d]. Values decoded to float32 on demand.
  */
-final class Safetensors(bytes: Array[Byte]):
-  private val headerLength: Long =
-    java.nio.ByteBuffer.wrap(bytes, 0, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong
+final class Safetensors(buffer: java.nio.ByteBuffer):
+  /** the bytes from `from` for `length`, little-endian — a view, no copy (in a browser the fetched ArrayBuffer itself) */
+  private def view(from: Int, length: Int): java.nio.ByteBuffer =
+    val b = buffer.duplicate()
+    b.position(from); b.limit(from + length)
+    b.slice().order(java.nio.ByteOrder.LITTLE_ENDIAN)
+  private val headerLength: Long = view(0, 8).getLong
   private val base = 8 + headerLength.toInt
   final case class Entry(dtype: String, shape: Vector[Int], from: Int, until: Int)
   val entries: Map[String, Entry] =
-    Json.fromText(new String(bytes, 8, headerLength.toInt, "UTF-8")) match
+    Json.fromText({ val h = new Array[Byte](headerLength.toInt); view(8, h.length).get(h); new String(h, "UTF-8") }) match
       case Json.Obj(fields) => fields.collect { case (name, Json.Obj(fs)) if name != "__metadata__" =>
         val dtype = fs.collectFirst { case ("dtype", Json.Str(s)) => s }.getOrElse("")
         val shape = fs.collectFirst { case ("shape", Json.Arr(xs)) => xs.map(_.asInstanceOf[Json.Num].n.toInt).toVector }.getOrElse(Vector.empty)
@@ -27,7 +31,7 @@ final class Safetensors(bytes: Array[Byte]):
   def floats(name: String): Array[Float] =
     val e = entries(name)
     val n = (e.until - e.from) / 2
-    val b = java.nio.ByteBuffer.wrap(bytes, base + e.from, e.until - e.from).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    val b = view(base + e.from, e.until - e.from)
     e.dtype match
       case "BF16" => Array.tabulate(n)(_ => java.lang.Float.intBitsToFloat((b.getShort & 0xffff) << 16))
       case "F16" => Array.tabulate(n)(_ => Safetensors.halfToFloat(b.getShort & 0xffff))
@@ -36,7 +40,7 @@ final class Safetensors(bytes: Array[Byte]):
   /** a U32 tensor as ints */
   def words(name: String): Array[Int] =
     val e = entries(name)
-    val b = java.nio.ByteBuffer.wrap(bytes, base + e.from, e.until - e.from).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    val b = view(base + e.from, e.until - e.from)
     Array.tabulate((e.until - e.from) / 4)(_ => b.getInt)
 
   def linear(prefix: String): QLinear =
@@ -44,6 +48,7 @@ final class Safetensors(bytes: Array[Byte]):
     QLinear(e.shape(0), e.shape(1) * 8, words(prefix + ".weight"), floats(prefix + ".scales"), floats(prefix + ".biases"))
 
 object Safetensors:
+  def apply(bytes: Array[Byte]): Safetensors = new Safetensors(java.nio.ByteBuffer.wrap(bytes))
   def halfToFloat(h: Int): Float =
     val s = (h >> 15) & 1; val e = (h >> 10) & 0x1f; val m = h & 0x3ff
     val f = if e == 0 then (if m == 0 then 0f else (m / 1024f) * math.pow(2, -14).toFloat)

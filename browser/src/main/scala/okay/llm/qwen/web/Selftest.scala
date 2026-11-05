@@ -36,7 +36,7 @@ object Selftest:
       model <- fetch("model.safetensors")
       config = Qwen3Config.parse(configText)
       tok = Tokenizer.fromJson(Json.fromText(tokText))
-      st = Safetensors(new Int8Array(model).toArray)
+      st = new Safetensors(TypedArrayBuffer.wrap(model))
       prompt = "<|im_start|>user\nHow many rows have country = France?<|im_end|>\n<|im_start|>assistant\n"
       ids = tok.encode(prompt)
       _ = say(s"model: ${config.layers} layers, ${model.byteLength / 1048576} MB; the prompt ${ids.length} tokens: " +

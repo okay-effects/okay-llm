@@ -13,19 +13,25 @@ import scala.concurrent.{ExecutionContext, Future}
  */
 final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Config):
   import config.*
-  private def lin(p: String): c.W = c.quantized(st.linear(p))
-  private def vec(name: String): c.T = { val a = st.floats(name); c.tensor(1, a.length, a) }
-  final class Layer(i: Int):
-    val p = s"model.layers.$i."
-    val inNorm = vec(p + "input_layernorm.weight"); val postNorm = vec(p + "post_attention_layernorm.weight")
-    val q = lin(p + "self_attn.q_proj"); val k = lin(p + "self_attn.k_proj")
-    val v = lin(p + "self_attn.v_proj"); val o = lin(p + "self_attn.o_proj")
-    val qNorm = vec(p + "self_attn.q_norm.weight"); val kNorm = vec(p + "self_attn.k_norm.weight")
-    val gate = lin(p + "mlp.gate_proj"); val up = lin(p + "mlp.up_proj"); val down = lin(p + "mlp.down_proj")
-  val blocks: Vector[Layer] = Vector.tabulate(layers)(Layer(_))
-  private val embedding: QLinear = st.linear("model.embed_tokens")
+  /** a layer's weights on the device */
+  final case class Layer(inNorm: c.T, postNorm: c.T, q: c.W, k: c.W, v: c.W, o: c.W, qNorm: c.T, kNorm: c.T,
+    gate: c.W, up: c.W, down: c.W)
+  // THE FILE IS READ ONCE, HERE, AND NOT KEPT: the weights live on the device from now on (a phone's browser has no
+  // room for the file beside them — 244 MB held by this object was a tab killed); the embedding stays on the CPU
+  // for the gather
+  val (blocks: Vector[Layer], embedding: QLinear) =
+    def lin(p: String): c.W = c.quantized(st.linear(p))
+    def vec(name: String): c.T = { val a = st.floats(name); c.tensor(1, a.length, a) }
+    val layersRead = Vector.tabulate(layers) { i =>
+      val p = s"model.layers.$i."
+      Layer(vec(p + "input_layernorm.weight"), vec(p + "post_attention_layernorm.weight"),
+        lin(p + "self_attn.q_proj"), lin(p + "self_attn.k_proj"), lin(p + "self_attn.v_proj"), lin(p + "self_attn.o_proj"),
+        vec(p + "self_attn.q_norm.weight"), vec(p + "self_attn.k_norm.weight"),
+        lin(p + "mlp.gate_proj"), lin(p + "mlp.up_proj"), lin(p + "mlp.down_proj"))
+    }
+    (layersRead, st.linear("model.embed_tokens"))
   private val head: c.W = c.quantized(embedding)
-  private val norm: c.T = vec("model.norm.weight")
+  private val norm: c.T = { val a = st.floats("model.norm.weight"); c.tensor(1, a.length, a) }
 
   /** the residual after `layer` at the rows `at` (none when `layer` is 0), and the next token's logits if asked */
   def forward(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean)(using ExecutionContext)
