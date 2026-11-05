@@ -8,3 +8,12 @@ Reference below: FreeToken (github.com/FlashML-org/FreeToken, Apache-2.0, read a
   opener): `server/reasoning_parser.py`.
 - **OpenAI Responses API** (for Codex): `server/responses_api.py` there; we speak chat completions and Anthropic only.
 - **Speculative stats in usage**: drafted / accepted tokens (their `draft_n`, `draft_n_accepted`), once mlx-scala has MTP.
+
+## The browser engine (operator, 2026-11-05)
+
+- **`browser`** (Scala.js): a `Compute` layer of devices — WebGPU (WGSL compute) and WebGL2 (fragment shaders over
+  float textures, okay-go-game's way) with the plain-Scala CPU handler as the reference — buffers and textures,
+  dense and 4-bit matmul, elementwise, RMSNorm, RoPE, attention; Qwen3's forward on it (`qwen`), the hidden states
+  and the logits a skill needs (okay-desk specs/data.md §15). Law: the handlers equal each other and mlx-scala.
+- **Shared with okay-go-game** (the operator): the same `Compute` layer runs the Go net too — a convolution added
+  as one more op; the game's GpuNet / GlNet become clients of it rather than their own kernels.
