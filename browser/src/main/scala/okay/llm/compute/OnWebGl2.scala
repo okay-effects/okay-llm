@@ -11,8 +11,13 @@ import scala.scalajs.js.typedarray.*
  * unsigned-integer texture the same way, its scales and biases float ones; an op a fragment shader drawn into the
  * output's texture (`Glsl`), a texel four outputs. Reads back at once (readPixels). Needs EXT_color_buffer_float.
  */
-final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compute:
+final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long) extends Compute:
   val api = "WebGL2"
+  /** THE CONTEXT LOST: a phone's browser takes the GPU's memory back from a page silently (iOS at a few hundred MB);
+   * every op after it fails in some other way (a shader that is not a shader) — so it is asked for, and said */
+  private def check(): Unit =
+    if gl.isContextLost().asInstanceOf[Boolean] then
+      throw IllegalStateException(f"WebGL2 lost its context with ${bytes / 1048576}%d MB in textures: this browser gives a page less GPU memory than the model needs")
   final class T(val rows: Int, val cols: Int, val tex: js.Dynamic, val h: Int)
   final class W(val out: Int, val in: Int, val words: js.Dynamic, val scales: js.Dynamic, val biases: js.Dynamic)
   private val WIDTH = 2048
@@ -23,39 +28,49 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
   var bytes = 0L
 
   private def height(texels: Int) = math.max(1, (texels + WIDTH - 1) / WIDTH)
-  private def texture(h: Int, data: js.Any, floats: Boolean): js.Dynamic =
+  private val RGBA16F = 0x881A; private val HALF = 0x140B
+  /** a texture of `h` rows: floats (RGBA32F), words (RGBA32UI), or halves (RGBA16F: a weight's scales and biases,
+   * BF16 in the file — half the memory of floats, sampled as floats) */
+  private def texture(h: Int, data: js.Any, kind: Int): js.Dynamic =
     val t = gl.createTexture()
     gl.bindTexture(TEX, t)
-    if floats then gl.texImage2D(TEX, 0, RGBA32F, WIDTH, h, 0, RGBA, FLOAT, data)
-    else gl.texImage2D(TEX, 0, RGBA32UI, WIDTH, h, 0, RGBA_INTEGER, UINT, data)
+    kind match
+      case 0 => gl.texImage2D(TEX, 0, RGBA32F, WIDTH, h, 0, RGBA, FLOAT, data)
+      case 1 => gl.texImage2D(TEX, 0, RGBA32UI, WIDTH, h, 0, RGBA_INTEGER, UINT, data)
+      case _ => gl.texImage2D(TEX, 0, RGBA16F, WIDTH, h, 0, RGBA, HALF, data)
     gl.texParameteri(TEX, 0x2801, NEAREST); gl.texParameteri(TEX, 0x2800, NEAREST)
     gl.texParameteri(TEX, 0x2802, 0x812F); gl.texParameteri(TEX, 0x2803, 0x812F)
-    bytes += WIDTH * h * 16L
+    bytes += WIDTH * h * (if kind == 2 then 8L else 16L)
+    check()
     t
   private def floatTexture(data: Array[Float]): (js.Dynamic, Int) =
     val h = height((data.length + 3) / 4)
     val padded = new Float32Array(WIDTH * h * 4); padded.set(data.toTypedArray)
-    (texture(h, padded, floats = true), h)
+    (texture(h, padded, 0), h)
   private def wordTexture(data: Array[Int]): js.Dynamic =
     val h = height((data.length + 3) / 4)
     val padded = new Uint32Array(WIDTH * h * 4); padded.set(new Uint32Array(data.toTypedArray.buffer))
-    texture(h, padded, floats = false)
+    texture(h, padded, 1)
   def tensor(rows: Int, cols: Int, data: Array[Float]): T =
     require(cols % 4 == 0, s"cols $cols not a multiple of 4")
     val (t, h) = floatTexture(data); T(rows, cols, t, h)
-  def quantized(q: QLinear): W =
-    W(q.out, q.in, wordTexture(q.words), floatTexture(q.scales)._1, floatTexture(q.biases)._1)
+  private def halfTexture(data: Array[Float]): js.Dynamic =
+    val h = height((data.length + 3) / 4)
+    val padded = new Uint16Array(WIDTH * h * 4)
+    var i = 0
+    while i < data.length do { padded(i) = OnWebGl2.half(data(i)); i += 1 }
+    texture(h, padded, 2)
+  def quantized(q: QLinear): W = W(q.out, q.in, wordTexture(q.words), halfTexture(q.scales), halfTexture(q.biases))
   // A POOL OF TEXTURES by height: an op takes one of its size, a release puts it back — a texture created and
   // deleted for every op (thousands a question) was freed late by a phone's driver and the tab died; the pool holds
   // at most `pooled` bytes, the rest deleted
   private val pool = scala.collection.mutable.Map.empty[Int, List[js.Dynamic]]
   private var pooledBytes = 0L
-  private val pooled = 96L * 1048576
   private def empty(rows: Int, cols: Int): T =
     val h = height(rows * cols / 4)
     pool.getOrElse(h, Nil) match
       case t :: rest => pool(h) = rest; pooledBytes -= WIDTH * h * 16L; T(rows, cols, t, h)
-      case Nil => T(rows, cols, texture(h, null, floats = true), h)
+      case Nil => T(rows, cols, texture(h, null, 0), h)
   def release(x: T): Unit =
     if pooledBytes + WIDTH * x.h * 16L <= pooled then { pool(x.h) = x.tex :: pool.getOrElse(x.h, Nil); pooledBytes += WIDTH * x.h * 16L }
     else { gl.deleteTexture(x.tex); bytes -= WIDTH * x.h * 16L }
@@ -82,6 +97,7 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
   /** one draw into `out`: the program, its int and float uniforms, its textures by name */
   private def draw(p: js.Dynamic, out: T, ints: Seq[(String, Int)], floats: Seq[(String, Float)],
       textures: Seq[(String, js.Dynamic)]): T =
+    check()
     gl.bindFramebuffer(FB, fb)
     gl.framebufferTexture2D(FB, COLOR0, TEX, out.tex, 0)
     gl.viewport(0, 0, WIDTH, out.h)
@@ -130,7 +146,8 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
 
 object OnWebGl2:
   /** the device on WebGL2 — or why not: no WebGL2, no float render targets, textures too small, a shader refused */
-  def create(): Either[String, OnWebGl2] =
+  /** `pooled`: the bytes of textures kept for reuse (less on a phone) */
+  def create(pooled: Long = 96L * 1048576): Either[String, OnWebGl2] =
     try
       val canvas = g.document.createElement("canvas")
       val gl = canvas.getContext("webgl2")
@@ -142,8 +159,16 @@ object OnWebGl2:
         val info = gl.getExtension("WEBGL_debug_renderer_info")
         val name = if info == null then gl.getParameter(0x1F01).toString
           else gl.getParameter(info.UNMASKED_RENDERER_WEBGL).toString
-        Right(OnWebGl2(gl, name))
+        Right(OnWebGl2(gl, name, pooled))
     catch case e: Throwable => Left(s"WebGL2 failed: ${e.getMessage}")
+
+  /** a float as IEEE half bits (round to nearest; the large to infinity, the tiny to zero) */
+  def half(f: Float): Int =
+    val b = java.lang.Float.floatToIntBits(f)
+    val sign = (b >>> 16) & 0x8000; val e = ((b >>> 23) & 0xff) - 127 + 15; val m = b & 0x7fffff
+    if e >= 31 then sign | 0x7c00
+    else if e <= 0 then (if e < -10 then sign else sign | ((m | 0x800000) >>> (1 - e + 13)))
+    else sign | (e << 10) | (m >>> 13) | (if (m & 0x1000) != 0 then 1 else 0)
 
 /** THE SHADERS, in GLSL ES 3.00: a fragment a texel of the output, four values; `total` the output's texels */
 object Glsl:

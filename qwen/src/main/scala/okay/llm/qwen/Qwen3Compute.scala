@@ -11,7 +11,9 @@ import scala.concurrent.{ExecutionContext, Future}
  * the last row against the tied head. The weights go to the device once, at construction. What a skill needs: the
  * residual after a layer at some positions (`layer`, `at`), and the next token's logits.
  */
-final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Config):
+/** `headOnCpu`: the logits against the tied head computed on the CPU from the last row read back, the embedding's
+ * 78 MB not sent to the device — a phone's WebGL2 has no room for it; slower an ask (150M multiplies in JS) */
+final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Config, headOnCpu: Boolean = false):
   import config.*
   /** a layer's weights on the device */
   final case class Layer(inNorm: c.T, postNorm: c.T, q: c.W, k: c.W, v: c.W, o: c.W, qNorm: c.T, kNorm: c.T,
@@ -30,7 +32,7 @@ final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Confi
         lin(p + "mlp.gate_proj"), lin(p + "mlp.up_proj"), lin(p + "mlp.down_proj"))
     }
     (layersRead, st.linear("model.embed_tokens"))
-  private val head: c.W = c.quantized(embedding)
+  private val head: Option[c.W] = if headOnCpu then None else Some(c.quantized(embedding))
   private val norm: c.T = { val a = st.floats("model.norm.weight"); c.tensor(1, a.length, a) }
 
   /** A PREFIX ALREADY RUN: its length, every layer's k and v on the device (the rows 0 until n), the residual after
@@ -83,10 +85,12 @@ final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Confi
           if keep then kept = Some(cache.fold(c.slice(h, 0, n))(cc => c.concat(cc.h, h)))
       val fin = c.rmsNorm(h, norm, eps); c.release(h)
       val logits =
-        if withLogits then
-          val last = c.slice(fin, n - 1, n); val lg = c.linear(last, head); c.release(last)
-          val read = c.rows(lg, Seq(0)); c.release(lg)
-          read.map(_.head)
+        if withLogits then head match
+          case Some(hd) =>
+            val last = c.slice(fin, n - 1, n); val lg = c.linear(last, hd); c.release(last)
+            val read = c.rows(lg, Seq(0)); c.release(lg)
+            read.map(_.head)
+          case None => c.rows(fin, Seq(n - 1)).map(rows => embedding(rows.head))
         else Future.successful(Array.empty[Float])
       c.release(fin)
       val next = if keep then Some(Cache(ids.length, ks.result(), vs.result(), kept.getOrElse(c.tensor(0, hidden, Array.empty)), layer)) else None

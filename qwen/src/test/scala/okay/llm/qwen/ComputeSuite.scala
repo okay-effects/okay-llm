@@ -55,3 +55,17 @@ class CacheSuite extends munit.FunSuite:
     val (same, _, _) = Await.result(m.run(ids, layer, at, withLogits = false, all, keep = false), 10.minutes)
     assert(whole.zip(same).forall((a, b) => a.sameElements(b)))
   }
+
+/** the head on the CPU: the same logits as on the device */
+class HeadSuite extends munit.FunSuite:
+  override val munitTimeout = 10.minutes
+  test("logits by the CPU head == logits by the device's") {
+    val dir = sys.env.get("QWEN_DIR").map(java.nio.file.Path.of(_))
+    assume(dir.isDefined, "QWEN_DIR not set")
+    val st = Safetensors(java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors")))
+    val config = Qwen3Config.parse(java.nio.file.Files.readString(dir.get.resolve("config.json")))
+    val ids = Array(151644, 872, 198, 4340, 1657, 6978, 614, 3146, 284, 9625, 30, 151645, 198, 151644, 77091, 198)
+    val a = Await.result(Qwen3Compute(OnCpu(), st, config).forward(ids, 0, Nil, withLogits = true), 10.minutes)._2
+    val b = Await.result(Qwen3Compute(OnCpu(), st, config, headOnCpu = true).forward(ids, 0, Nil, withLogits = true), 10.minutes)._2
+    assert(a.zip(b).map((x, y) => math.abs(x - y)).max < 1e-3f)
+  }
