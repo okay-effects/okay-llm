@@ -86,3 +86,42 @@ class SplitSuite extends munit.FunSuite:
       if st.entries(n).dtype == "U32" then assert(many.words(n).sameElements(st.words(n)), n)
       else assert(many.floats(n).sameElements(st.floats(n)), n)
   }
+
+/** THE VOCABULARY'S BLOCKS: every block written and read, loaded together == the whole embedding (the states, the
+ * logits, exactly); the blocks of English and Russian alone: the logits of their tokens the same, the rest −∞ */
+class VocabSuite extends munit.FunSuite:
+  override val munitTimeout = 10.minutes
+  test("blocks together == the whole; a language's blocks alone") {
+    val dir = sys.env.get("QWEN_DIR").map(java.nio.file.Path.of(_))
+    assume(dir.isDefined, "QWEN_DIR not set")
+    val st = Safetensors(java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors")))
+    val config = Qwen3Config.parse(java.nio.file.Files.readString(dir.get.resolve("config.json")))
+    val tok = Tokenizer.fromJson(okay.effects.json.Json.fromText(java.nio.file.Files.readString(dir.get.resolve("tokenizer.json"))))
+    val words = java.nio.file.Path.of("/usr/share/dict/words")
+    val uses = Vocab.uses(tok, if java.nio.file.Files.exists(words) then scala.io.Source.fromFile(words.toFile).getLines()
+      else Iterator("How", "many", "orders", "are", "unpaid", "total", "amount", "per", "country", "user", "assistant"))
+    val of = Vocab.of(tok, uses)
+    val byBlock = (0 until tok.size).groupBy(of).view.mapValues(_.toVector).toMap
+    println(s"blocks: " + Vocab.blocks.map(b => s"$b ${byBlock.getOrElse(b, Vector.empty).size}").mkString(", "))
+    val files = byBlock.map((b, ids) => b -> Vocab.blockFile(st, ids))
+    val all = Rows.Blocks(config.vocab, config.hidden)   // the embedding has rows past the tokenizer's size (padding)
+    for b <- Vocab.blocks; f <- files.get(b) do { val (ids, q) = Vocab.readBlock(Safetensors(f)); all.add(ids, q) }
+    val ids = tok.encode("<|im_start|>user\nHow many orders are unpaid? Сколько заказов?<|im_end|>\n<|im_start|>assistant\n")
+    val whole = Qwen3Compute(OnCpu(), st, config)
+    val blocks = Qwen3Compute(OnCpu(), st, config, embedGiven = Some(all))
+    val (s1, l1) = Await.result(whole.forward(ids, config.layers, Seq(0, ids.length - 1), withLogits = true), 10.minutes)
+    val (s2, l2) = Await.result(blocks.forward(ids, config.layers, Seq(0, ids.length - 1), withLogits = true), 10.minutes)
+    assert(s1.zip(s2).forall((a, b) => a.sameElements(b)))
+    assert(l1.take(tok.size).sameElements(l2.take(tok.size)))
+    // English and Russian alone: common, latin-en, cyrillic
+    val some = Rows.Blocks(config.vocab, config.hidden)
+    for b <- Vector("common", "latin-en", "cyrillic"); f <- files.get(b) do { val (i, q) = Vocab.readBlock(Safetensors(f)); some.add(i, q) }
+    val missing = ids.filterNot(some.has).map(id => s"$id '${tok.decode(Seq(id))}' ${of(id)}")
+    assert(missing.isEmpty, "tokens of the prompt with no block loaded: " + missing.mkString(", "))
+    val partial = Qwen3Compute(OnCpu(), st, config, headOnCpu = true, embedGiven = Some(some))
+    val (s3, l3) = Await.result(partial.forward(ids, config.layers, Seq(0, ids.length - 1), withLogits = true), 10.minutes)
+    assert(s1.zip(s3).forall((a, b) => a.sameElements(b)))
+    val cjk = (0 until tok.size).find(id => of(id) == "cjk").get
+    assert(l3(cjk).isNegInfinity && l3(ids.last) == l1(ids.last))
+    println(f"loaded for English + Russian: ${some.packed._2.length} of ${tok.size} rows")
+  }

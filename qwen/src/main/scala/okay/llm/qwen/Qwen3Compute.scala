@@ -13,7 +13,10 @@ import scala.concurrent.{ExecutionContext, Future}
  */
 /** `headOnCpu`: the logits against the tied head computed on the CPU from the last row read back, the embedding's
  * 78 MB not sent to the device — a phone's WebGL2 has no room for it; slower an ask (150M multiplies in JS) */
-final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, headOnCpu: Boolean = false):
+/** `embed`: the embedding's rows — the whole from the file, or blocks by language (`Rows.Blocks`, more loaded as tokens
+ * appear: `rehead()` after) */
+final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, headOnCpu: Boolean = false,
+    embedGiven: Option[Rows] = None):
   import config.*
   /** a layer's weights on the device */
   final case class Layer(inNorm: c.T, postNorm: c.T, q: c.W, k: c.W, v: c.W, o: c.W, qNorm: c.T, kNorm: c.T,
@@ -21,7 +24,7 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
   // THE FILE IS READ ONCE, HERE, AND NOT KEPT: the weights live on the device from now on (a phone's browser has no
   // room for the file beside them — 244 MB held by this object was a tab killed); the embedding stays on the CPU
   // for the gather
-  val (blocks: Vector[Layer], embedding: QLinear) =
+  val (blocks: Vector[Layer], embedding: Rows) =
     def lin(p: String): c.W = c.quantized(st.linear(p))
     def vec(name: String): c.T = { val a = st.floats(name); c.tensor(1, a.length, a) }
     val layersRead = Vector.tabulate(layers) { i =>
@@ -31,8 +34,11 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
         vec(p + "self_attn.q_norm.weight"), vec(p + "self_attn.k_norm.weight"),
         lin(p + "mlp.gate_proj"), lin(p + "mlp.up_proj"), lin(p + "mlp.down_proj"))
     }
-    (layersRead, st.linear("model.embed_tokens"))
-  private val head: Option[c.W] = if headOnCpu then None else Some(c.quantized(embedding))
+    (layersRead, embedGiven.getOrElse(Rows.Full(st.linear("model.embed_tokens"))))
+  // the head: the loaded rows on the device, and the id of each; made again when rows are added
+  private var head: Option[(c.W, Array[Int])] = None
+  def rehead(): Unit = if !headOnCpu then { val (q, ids) = embedding.packed; head = Some((c.quantized(q), ids)) }
+  rehead()
   private val norm: c.T = { val a = st.floats("model.norm.weight"); c.tensor(1, a.length, a) }
 
   /** A PREFIX ALREADY RUN: its length, every layer's k and v on the device (the rows 0 until n), the residual after
@@ -86,11 +92,13 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
       val fin = c.rmsNorm(h, norm, eps); c.release(h)
       val logits =
         if withLogits then head match
-          case Some(hd) =>
+          case Some((hd, ids)) =>
             val last = c.slice(fin, n - 1, n); val lg = c.linear(last, hd); c.release(last)
             val read = c.rows(lg, Seq(0)); c.release(lg)
-            read.map(_.head)
-          case None => c.rows(fin, Seq(n - 1)).map(rows => embedding(rows.head))
+            read.map { rows =>
+              val out = Array.fill(vocab)(Float.NegativeInfinity)
+              ids.zipWithIndex.foreach((id, k) => out(id) = rows.head(k)); out }
+          case None => c.rows(fin, Seq(n - 1)).map(rows => embedding.logits(rows.head))
         else Future.successful(Array.empty[Float])
       c.release(fin)
       val next = if keep then Some(Cache(ids.length, ks.result(), vs.result(), kept.getOrElse(c.tensor(0, hidden, Array.empty)), layer)) else None
