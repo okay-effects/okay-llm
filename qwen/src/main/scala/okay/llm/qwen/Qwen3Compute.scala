@@ -13,7 +13,7 @@ import scala.concurrent.{ExecutionContext, Future}
  */
 /** `headOnCpu`: the logits against the tied head computed on the CPU from the last row read back, the embedding's
  * 78 MB not sent to the device — a phone's WebGL2 has no room for it; slower an ask (150M multiplies in JS) */
-final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Config, headOnCpu: Boolean = false):
+final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, headOnCpu: Boolean = false):
   import config.*
   /** a layer's weights on the device */
   final case class Layer(inNorm: c.T, postNorm: c.T, q: c.W, k: c.W, v: c.W, o: c.W, qNorm: c.T, kNorm: c.T,

@@ -22,7 +22,7 @@ object Qwen3Config:
     Qwen3Config(int("hidden_size"), int("num_hidden_layers"), int("num_attention_heads"), int("num_key_value_heads"),
       int("head_dim"), int("intermediate_size"), int("vocab_size"), num("rope_theta", 1000000f), num("rms_norm_eps", 1e-6f))
 
-final class Qwen3Forward(st: Safetensors, val config: Qwen3Config):
+final class Qwen3Forward(st: Tensors, val config: Qwen3Config):
   import config.*
   final class Layer(i: Int):
     val p = s"model.layers.$i."

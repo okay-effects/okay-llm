@@ -69,3 +69,20 @@ class HeadSuite extends munit.FunSuite:
     val b = Await.result(Qwen3Compute(OnCpu(), st, config, headOnCpu = true).forward(ids, 0, Nil, withLogits = true), 10.minutes)._2
     assert(a.zip(b).map((x, y) => math.abs(x - y)).max < 1e-3f)
   }
+
+/** the file split into files of a few layers each, read as one: every tensor the same */
+class SplitSuite extends munit.FunSuite:
+  test("split and read as Many == the whole") {
+    val dir = sys.env.get("QWEN_DIR").map(java.nio.file.Path.of(_))
+    assume(dir.isDefined, "QWEN_DIR not set")
+    val st = Safetensors(java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors")))
+    val files = Safetensors.split(st, 60 * 1048576)
+    println(s"split: ${files.size} files of ${files.map(_.length / 1048576).mkString(", ")} MB")
+    assert(files.size >= 4 && files.forall(_.length <= 90 * 1048576))
+    val many = Tensors.Many(files.map(Safetensors(_)))
+    for n <- st.entries.keys do
+      assert(many.has(n), n)
+      assertEquals(many.shape(n), st.shape(n), n)
+      if st.entries(n).dtype == "U32" then assert(many.words(n).sameElements(st.words(n)), n)
+      else assert(many.floats(n).sameElements(st.floats(n)), n)
+  }
