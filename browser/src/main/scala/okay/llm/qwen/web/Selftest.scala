@@ -74,7 +74,7 @@ object Selftest:
       gpu <- OnWebGpu.create()
       okGpu <- gpu.fold(why => { say(s"WebGPU: $why"); Future.successful(true) },
         d => { say(s"WebGPU: ${d.adapter}"); run(d).map(check("WebGPU", _)) })
-      gl = OnWebGl2.create()
+      gl = OnWebGl2.create(headsAtOnce = 2)
       okGl <- gl.fold(why => { say(s"WebGL2: $why"); Future.successful(true) },
         d => { say(s"WebGL2: ${d.adapter}"); run(d).map(check("WebGL2", _)) })
     yield say(if okGpu && okGl then "selftest: done" else "selftest: failed: a device differs from the CPU"))

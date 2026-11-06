@@ -11,7 +11,7 @@ import scala.scalajs.js.typedarray.*
  * unsigned-integer texture the same way, its scales and biases float ones; an op a fragment shader drawn into the
  * output's texture (`Glsl`), a texel four outputs. Reads back at once (readPixels). Needs EXT_color_buffer_float.
  */
-final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long) extends Compute:
+final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long, headsAtOnce: Int) extends Compute:
   val api = "WebGL2"
   /** THE CONTEXT LOST: a phone's browser takes the GPU's memory back from a page silently (iOS at a few hundred MB);
    * every op after it fails in some other way (a shader that is not a shader) — so it is asked for, and said */
@@ -121,14 +121,21 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long)
   def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int): T =
     draw(ropeP, empty(x.rows, x.cols), Seq("heads" -> heads, "dim" -> headDim, "pos0" -> pos0), Seq("eps" -> eps, "theta" -> theta),
       Seq("X" -> x.tex, "Wn" -> w.tex))
+  /** the heads in groups of `headsAtOnce`: the scores of a group a texture of n × G × nk (all 16 heads of 400 tokens
+   * were 41 MB a layer, made and dropped nineteen times a forward — a phone's driver freed them late and the tab
+   * died); each group's pass writes its heads' columns of the one output */
   def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int): T =
     val n = q.rows; val nk = k.rows; val np = (nk + 3) / 4 * 4
     require(nk == pos0 + n, s"k has $nk rows for $pos0 + $n")
-    val ints = Seq("n" -> n, "nk" -> nk, "np" -> np, "heads" -> heads, "kv" -> kvHeads, "dim" -> headDim, "pos0" -> pos0)
-    val s = draw(scoresP, empty(n * heads, np), ints, Seq("scale" -> (1.0 / math.sqrt(headDim)).toFloat),
-      Seq("Q" -> q.tex, "K" -> k.tex))
-    val out = draw(attendP, empty(n, heads * headDim), ints, Nil, Seq("S" -> s.tex, "V" -> v.tex))
-    release(s)
+    val g = math.max(1, math.min(heads, headsAtOnce))
+    val out = empty(n, heads * headDim)
+    for first <- 0 until heads by g do
+      val gs = math.min(g, heads - first)
+      val ints = Seq("n" -> n, "nk" -> nk, "np" -> np, "heads" -> heads, "kv" -> kvHeads, "dim" -> headDim, "pos0" -> pos0,
+        "hg0" -> first, "G" -> gs)
+      val s = draw(scoresP, empty(n * gs, np), ints, Seq("scale" -> (1.0 / math.sqrt(headDim)).toFloat), Seq("Q" -> q.tex, "K" -> k.tex))
+      draw(attendP, out, ints, Nil, Seq("S" -> s.tex, "V" -> v.tex))
+      release(s)
     out
   def add(a: T, b: T): T = draw(addP, empty(a.rows, a.cols), Nil, Nil, Seq("A" -> a.tex, "B" -> b.tex))
   def swiglu(gate: T, up: T): T =
@@ -147,7 +154,7 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long)
 object OnWebGl2:
   /** the device on WebGL2 — or why not: no WebGL2, no float render targets, textures too small, a shader refused */
   /** `pooled`: the bytes of textures kept for reuse (less on a phone) */
-  def create(pooled: Long = 96L * 1048576): Either[String, OnWebGl2] =
+  def create(pooled: Long = 96L * 1048576, headsAtOnce: Int = 16): Either[String, OnWebGl2] =
     try
       val canvas = g.document.createElement("canvas")
       val gl = canvas.getContext("webgl2")
@@ -159,7 +166,7 @@ object OnWebGl2:
         val info = gl.getExtension("WEBGL_debug_renderer_info")
         val name = if info == null then gl.getParameter(0x1F01).toString
           else gl.getParameter(info.UNMASKED_RENDERER_WEBGL).toString
-        Right(OnWebGl2(gl, name, pooled))
+        Right(OnWebGl2(gl, name, pooled, headsAtOnce))
     catch case e: Throwable => Left(s"WebGL2 failed: ${e.getMessage}")
 
   /** a float as IEEE half bits (round to nearest; the large to infinity, the tiny to zero) */
@@ -238,7 +245,7 @@ void main() {
   /** the scores [n · heads, np]: s[t, h, j] = q[t, h] · k[j, kv(h)] scaled, -1e30 beyond the causal edge */
   val scores: String = head + """
 uniform sampler2D Q; uniform sampler2D K; uniform int n; uniform int nk; uniform int np; uniform int heads;
-uniform int kv; uniform int dim; uniform float scale; uniform int pos0;
+uniform int kv; uniform int dim; uniform float scale; uniform int pos0; uniform int hg0; uniform int G;
 float score(int t, int hd, int j) {
   if (j > pos0 + t || j >= nk) return -1e30;
   int kvh = hd / (heads / kv); int qb = t * heads * dim / 4 + hd * dim / 4; int kb = j * kv * dim / 4 + kvh * dim / 4;
@@ -248,17 +255,18 @@ float score(int t, int hd, int j) {
 }
 void main() {
   int i = idx(); if (i >= total) discard;
-  int c4 = np / 4; int row = i / c4; int j = (i - row * c4) * 4; int t = row / heads; int hd = row - t * heads;
+  int c4 = np / 4; int row = i / c4; int j = (i - row * c4) * 4; int t = row / G; int hd = hg0 + row - t * G;
   o = vec4(score(t, hd, j), score(t, hd, j + 1), score(t, hd, j + 2), score(t, hd, j + 3));
 }"""
   /** y[t, h, i..i+3] = softmax_j(s[t, h, j]) · v[j, kv(h), i..i+3] */
   val attend: String = head + """
 uniform sampler2D S; uniform sampler2D V; uniform int n; uniform int nk; uniform int np; uniform int heads;
-uniform int kv; uniform int dim; uniform int pos0;
+uniform int kv; uniform int dim; uniform int pos0; uniform int hg0; uniform int G;
 void main() {
   int i = idx(); if (i >= total) discard;
   int c4 = heads * dim / 4; int t = i / c4; int c = (i - t * c4) * 4; int hd = c / dim; int d = c - hd * dim;
-  int kvh = hd / (heads / kv); int row = (t * heads + hd) * np; int last = pos0 + t;
+  if (hd < hg0 || hd >= hg0 + G) discard;
+  int kvh = hd / (heads / kv); int row = (t * G + hd - hg0) * np; int last = pos0 + t;
   float m = -1e30;
   for (int j = 0; j <= last; j++) m = max(m, tex1(S, row + j));
   float z = 0.0;
