@@ -125,3 +125,28 @@ class VocabSuite extends munit.FunSuite:
     assert(l3(cjk).isNegInfinity && l3(ids.last) == l1(ids.last))
     println(f"loaded for English + Russian: ${some.packed._2.length} of ${tok.size} rows")
   }
+
+/** A COMPONENT ABSENT == A COMPONENT SILENCED: a layer's attention (and another's MLP) taken out of the file gives
+ * the same states as the same component left in with its output's scales and biases zeroed (what the map did) */
+class SkipSuite extends munit.FunSuite:
+  override val munitTimeout = 10.minutes
+  test("the file without a layer's attention and another's MLP == the file with them zeroed") {
+    val dir = sys.env.get("QWEN_DIR").map(java.nio.file.Path.of(_))
+    assume(dir.isDefined, "QWEN_DIR not set")
+    val st = Safetensors(java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors")))
+    val config = Qwen3Config.parse(java.nio.file.Files.readString(dir.get.resolve("config.json")))
+    val attnOf = "model.layers.1.self_attn."; val mlpOf = "model.layers.9.mlp."
+    val zeroedNames = Set(attnOf + "o_proj.scales", attnOf + "o_proj.biases", mlpOf + "down_proj.scales", mlpOf + "down_proj.biases")
+    def entry(n: String, bytes: Array[Byte]) = { val e = st.entries(n); (n, e.dtype, e.shape, bytes) }
+    val zeroed = Safetensors(Safetensors.write(st.entries.keys.toVector.sorted.map(n =>
+      entry(n, if zeroedNames(n) then new Array[Byte](st.raw(n).length) else st.raw(n)))))
+    val absent = Safetensors(Safetensors.write(st.entries.keys.toVector.sorted
+      .filterNot(n => n.startsWith(attnOf) || n == "model.layers.1.input_layernorm.weight" || n.startsWith(mlpOf) || n == "model.layers.9.post_attention_layernorm.weight")
+      .map(n => entry(n, st.raw(n)))))
+    val ids = Array(151644, 872, 198, 4340, 1657, 6978, 614, 3146, 284, 9625, 30, 151645, 198, 151644, 77091, 198)
+    val a = Await.result(Qwen3Compute(OnCpu(), zeroed, config).forward(ids, config.layers, Seq(0, 7, ids.length - 1), withLogits = true), 10.minutes)
+    val b = Await.result(Qwen3Compute(OnCpu(), absent, config).forward(ids, config.layers, Seq(0, 7, ids.length - 1), withLogits = true), 10.minutes)
+    assert(a._1.zip(b._1).forall((x, y) => x.sameElements(y)), "the states")
+    assert(a._2.sameElements(b._2), "the logits")
+    println("a component absent == silenced: the states and the logits the same, exactly")
+  }

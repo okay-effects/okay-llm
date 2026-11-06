@@ -1,6 +1,6 @@
 package okay.llm.qwen
 
-import okay.llm.compute.{Compute, QLinear}
+import okay.llm.compute.Compute
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -18,9 +18,11 @@ import scala.concurrent.{ExecutionContext, Future}
 final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, headOnCpu: Boolean = false,
     embedGiven: Option[Rows] = None):
   import config.*
-  /** a layer's weights on the device */
-  final case class Layer(inNorm: c.T, postNorm: c.T, q: c.W, k: c.W, v: c.W, o: c.W, qNorm: c.T, kNorm: c.T,
-    gate: c.W, up: c.W, down: c.W)
+  /** a layer's weights on the device; a component the file has not (removed by the map: okay-inlay specs/core.md §11)
+   * is None and the forward skips it — the residual goes on as it was */
+  final case class Attn(inNorm: c.T, q: c.W, k: c.W, v: c.W, o: c.W, qNorm: c.T, kNorm: c.T)
+  final case class Mlp(postNorm: c.T, gate: c.W, up: c.W, down: c.W)
+  final case class Layer(attn: Option[Attn], mlp: Option[Mlp])
   // THE FILE IS READ ONCE, HERE, AND NOT KEPT: the weights live on the device from now on (a phone's browser has no
   // room for the file beside them — 244 MB held by this object was a tab killed); the embedding stays on the CPU
   // for the gather
@@ -29,10 +31,12 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
     def vec(name: String): c.T = { val a = st.floats(name); c.tensor(1, a.length, a) }
     val layersRead = Vector.tabulate(layers) { i =>
       val p = s"model.layers.$i."
-      Layer(vec(p + "input_layernorm.weight"), vec(p + "post_attention_layernorm.weight"),
-        lin(p + "self_attn.q_proj"), lin(p + "self_attn.k_proj"), lin(p + "self_attn.v_proj"), lin(p + "self_attn.o_proj"),
-        vec(p + "self_attn.q_norm.weight"), vec(p + "self_attn.k_norm.weight"),
-        lin(p + "mlp.gate_proj"), lin(p + "mlp.up_proj"), lin(p + "mlp.down_proj"))
+      Layer(
+        Option.when(st.has(p + "self_attn.o_proj.weight"))(Attn(vec(p + "input_layernorm.weight"),
+          lin(p + "self_attn.q_proj"), lin(p + "self_attn.k_proj"), lin(p + "self_attn.v_proj"), lin(p + "self_attn.o_proj"),
+          vec(p + "self_attn.q_norm.weight"), vec(p + "self_attn.k_norm.weight"))),
+        Option.when(st.has(p + "mlp.down_proj.weight"))(Mlp(vec(p + "post_attention_layernorm.weight"),
+          lin(p + "mlp.gate_proj"), lin(p + "mlp.up_proj"), lin(p + "mlp.down_proj"))))
     }
     (layersRead, embedGiven.getOrElse(Rows.Full(st.linear("model.embed_tokens"))))
   // the head: the loaded rows on the device, and the id of each; made again when rows are added
@@ -71,21 +75,31 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
       val ks = Vector.newBuilder[c.T]; val vs = Vector.newBuilder[c.T]
       var kept: Option[c.T] = None
       for (l, li) <- blocks.zipWithIndex do
-        val x = c.rmsNorm(h, l.inNorm, eps)
-        val q0 = c.linear(x, l.q); val k0 = c.linear(x, l.k); val v = c.linear(x, l.v); c.release(x)
-        val q = c.headNormRope(q0, l.qNorm, heads, headDim, eps, ropeTheta, n0); c.release(q0)
-        val k = c.headNormRope(k0, l.kNorm, kvHeads, headDim, eps, ropeTheta, n0); c.release(k0)
-        // the keys and values of the whole sequence: the prefix's from the cache, then the new ones
-        val (kAll, vAll) = cache.fold((k, v))(cc => { val ka = c.concat(cc.k(li), k); val va = c.concat(cc.v(li), v); c.release(k); c.release(v); (ka, va) })
-        val a = c.attention(q, kAll, vAll, heads, kvHeads, headDim, n0); c.release(q)
-        if keep then { ks += kAll; vs += vAll } else { c.release(kAll); c.release(vAll) }
-        val o = c.linear(a, l.o); c.release(a)
-        val h1 = c.add(h, o); c.release(h); c.release(o)
-        val y = c.rmsNorm(h1, l.postNorm, eps)
-        val g = c.linear(y, l.gate); val u = c.linear(y, l.up); c.release(y)
-        val act = c.swiglu(g, u); c.release(g); c.release(u)
-        val d = c.linear(act, l.down); c.release(act)
-        h = c.add(h1, d); c.release(h1); c.release(d)
+        // the attention, if the layer has one (its k and v kept for the cache; an absent one keeps an empty pair)
+        val h1 = l.attn match
+          case Some(at) =>
+            val x = c.rmsNorm(h, at.inNorm, eps)
+            val q0 = c.linear(x, at.q); val k0 = c.linear(x, at.k); val v = c.linear(x, at.v); c.release(x)
+            val q = c.headNormRope(q0, at.qNorm, heads, headDim, eps, ropeTheta, n0); c.release(q0)
+            val k = c.headNormRope(k0, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0); c.release(k0)
+            // the keys and values of the whole sequence: the prefix's from the cache, then the new ones
+            val (kAll, vAll) = cache.fold((k, v))(cc => { val ka = c.concat(cc.k(li), k); val va = c.concat(cc.v(li), v); c.release(k); c.release(v); (ka, va) })
+            val a = c.attention(q, kAll, vAll, heads, kvHeads, headDim, n0); c.release(q)
+            if keep then { ks += kAll; vs += vAll } else { c.release(kAll); c.release(vAll) }
+            val o = c.linear(a, at.o); c.release(a)
+            val h1 = c.add(h, o); c.release(h); c.release(o); h1
+          case None =>
+            if keep then { ks += c.tensor(0, kvDim, Array.empty); vs += c.tensor(0, kvDim, Array.empty) }
+            h
+        // the MLP, if the layer has one
+        h = l.mlp match
+          case Some(m) =>
+            val y = c.rmsNorm(h1, m.postNorm, eps)
+            val g = c.linear(y, m.gate); val u = c.linear(y, m.up); c.release(y)
+            val act = c.swiglu(g, u); c.release(g); c.release(u)
+            val d = c.linear(act, m.down); c.release(act)
+            val h2 = c.add(h1, d); c.release(h1); c.release(d); h2
+          case None => h1
         if li + 1 == layer then
           states = c.rows(h, after.map(_ - n0))
           if keep then kept = Some(cache.fold(c.slice(h, 0, n))(cc => c.concat(cc.h, h)))
