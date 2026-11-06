@@ -24,11 +24,15 @@ trait Compute:
   /** every row RMS-normed with the weight `w` (1 × cols) */
   def rmsNorm(x: T, w: T, eps: Float): T
   /** every head of every row (cols = heads · headDim) RMS-normed by `w` (1 × headDim), then RoPE by the row's
-   * position: the halves rotated, the frequencies theta^(-2i/headDim) */
-  def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float): T
-  /** causal attention: q rows × (heads · headDim), k and v rows × (kvHeads · headDim); the head h reads the kv head
-   * h / (heads / kvHeads); the scores scaled by 1 / sqrt(headDim) */
-  def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int): T
+   * position — `pos0` plus the row's number (a suffix after a cached prefix): the halves rotated, the frequencies
+   * theta^(-2i/headDim) */
+  def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int = 0): T
+  /** causal attention: q rows × (heads · headDim) at positions `pos0` plus the row, k and v rows × (kvHeads · headDim)
+   * at positions 0 until k.rows (k.rows = pos0 + q.rows); the head h reads the kv head h / (heads / kvHeads); the
+   * scores scaled by 1 / sqrt(headDim) */
+  def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int = 0): T
+  /** the rows of `a` then the rows of `b` (the same cols) */
+  def concat(a: T, b: T): T
   def add(a: T, b: T): T
   /** gate · sigmoid(gate) · up */
   def swiglu(gate: T, up: T): T

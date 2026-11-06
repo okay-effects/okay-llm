@@ -45,9 +45,20 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
     val (t, h) = floatTexture(data); T(rows, cols, t, h)
   def quantized(q: QLinear): W =
     W(q.out, q.in, wordTexture(q.words), floatTexture(q.scales)._1, floatTexture(q.biases)._1)
+  // A POOL OF TEXTURES by height: an op takes one of its size, a release puts it back — a texture created and
+  // deleted for every op (thousands a question) was freed late by a phone's driver and the tab died; the pool holds
+  // at most `pooled` bytes, the rest deleted
+  private val pool = scala.collection.mutable.Map.empty[Int, List[js.Dynamic]]
+  private var pooledBytes = 0L
+  private val pooled = 96L * 1048576
   private def empty(rows: Int, cols: Int): T =
-    val h = height(rows * cols / 4); T(rows, cols, texture(h, null, floats = true), h)
-  def release(x: T): Unit = { gl.deleteTexture(x.tex); bytes -= WIDTH * x.h * 16L }
+    val h = height(rows * cols / 4)
+    pool.getOrElse(h, Nil) match
+      case t :: rest => pool(h) = rest; pooledBytes -= WIDTH * h * 16L; T(rows, cols, t, h)
+      case Nil => T(rows, cols, texture(h, null, floats = true), h)
+  def release(x: T): Unit =
+    if pooledBytes + WIDTH * x.h * 16L <= pooled then { pool(x.h) = x.tex :: pool.getOrElse(x.h, Nil); pooledBytes += WIDTH * x.h * 16L }
+    else { gl.deleteTexture(x.tex); bytes -= WIDTH * x.h * 16L }
 
   private def program(code: String): js.Dynamic =
     def shader(kind: Int, src: String) =
@@ -64,6 +75,7 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
   private lazy val ropeP = program(Glsl.headNormRope); private lazy val scoresP = program(Glsl.scores)
   private lazy val attendP = program(Glsl.attend); private lazy val addP = program(Glsl.add)
   private lazy val swigluP = program(Glsl.swiglu); private lazy val sliceP = program(Glsl.slice)
+  private lazy val concatP = program(Glsl.concat)
   private val vao = gl.createVertexArray()
   private val fb = gl.createFramebuffer()
 
@@ -90,12 +102,13 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
       Seq("X" -> x.tex, "Wd" -> w.words, "S" -> w.scales, "B" -> w.biases))
   def rmsNorm(x: T, w: T, eps: Float): T =
     draw(normP, empty(x.rows, x.cols), Seq("cols" -> x.cols), Seq("eps" -> eps), Seq("X" -> x.tex, "Wn" -> w.tex))
-  def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float): T =
-    draw(ropeP, empty(x.rows, x.cols), Seq("heads" -> heads, "dim" -> headDim), Seq("eps" -> eps, "theta" -> theta),
+  def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int): T =
+    draw(ropeP, empty(x.rows, x.cols), Seq("heads" -> heads, "dim" -> headDim, "pos0" -> pos0), Seq("eps" -> eps, "theta" -> theta),
       Seq("X" -> x.tex, "Wn" -> w.tex))
-  def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int): T =
-    val n = q.rows; val np = (n + 3) / 4 * 4
-    val ints = Seq("n" -> n, "np" -> np, "heads" -> heads, "kv" -> kvHeads, "dim" -> headDim)
+  def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int): T =
+    val n = q.rows; val nk = k.rows; val np = (nk + 3) / 4 * 4
+    require(nk == pos0 + n, s"k has $nk rows for $pos0 + $n")
+    val ints = Seq("n" -> n, "nk" -> nk, "np" -> np, "heads" -> heads, "kv" -> kvHeads, "dim" -> headDim, "pos0" -> pos0)
     val s = draw(scoresP, empty(n * heads, np), ints, Seq("scale" -> (1.0 / math.sqrt(headDim)).toFloat),
       Seq("Q" -> q.tex, "K" -> k.tex))
     val out = draw(attendP, empty(n, heads * headDim), ints, Nil, Seq("S" -> s.tex, "V" -> v.tex))
@@ -104,6 +117,8 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String) extends Compu
   def add(a: T, b: T): T = draw(addP, empty(a.rows, a.cols), Nil, Nil, Seq("A" -> a.tex, "B" -> b.tex))
   def swiglu(gate: T, up: T): T =
     draw(swigluP, empty(gate.rows, gate.cols), Nil, Nil, Seq("A" -> gate.tex, "B" -> up.tex))
+  def concat(a: T, b: T): T =
+    draw(concatP, empty(a.rows + b.rows, a.cols), Seq("na" -> (a.rows * a.cols / 4)), Nil, Seq("A" -> a.tex, "B" -> b.tex))
   def slice(x: T, from: Int, until: Int): T =
     draw(sliceP, empty(until - from, x.cols), Seq("off" -> from * x.cols / 4), Nil, Seq("X" -> x.tex))
   def rows(x: T, at: Seq[Int]): Future[Vector[Array[Float]]] =
@@ -178,11 +193,12 @@ void main() {
 }"""
   val headNormRope: String = head + """
 uniform sampler2D X; uniform sampler2D Wn; uniform int heads; uniform int dim; uniform float eps; uniform float theta;
+uniform int pos0;
 float ro(int r, int hd, int d, float s) {
   int hf = dim / 2; int base = r * heads * dim + hd * dim;
   int lo = d < hf ? d : d - hf;
   float x1 = tex1(X, base + lo) * s * tex1(Wn, lo); float x2 = tex1(X, base + lo + hf) * s * tex1(Wn, lo + hf);
-  float a = float(r) * pow(theta, -2.0 * float(lo) / float(dim));
+  float a = float(pos0 + r) * pow(theta, -2.0 * float(lo) / float(dim));
   return d < hf ? x1 * cos(a) - x2 * sin(a) : x2 * cos(a) + x1 * sin(a);
 }
 void main() {
@@ -196,10 +212,10 @@ void main() {
 }"""
   /** the scores [n · heads, np]: s[t, h, j] = q[t, h] · k[j, kv(h)] scaled, -1e30 beyond the causal edge */
   val scores: String = head + """
-uniform sampler2D Q; uniform sampler2D K; uniform int n; uniform int np; uniform int heads; uniform int kv;
-uniform int dim; uniform float scale;
+uniform sampler2D Q; uniform sampler2D K; uniform int n; uniform int nk; uniform int np; uniform int heads;
+uniform int kv; uniform int dim; uniform float scale; uniform int pos0;
 float score(int t, int hd, int j) {
-  if (j > t || j >= n) return -1e30;
+  if (j > pos0 + t || j >= nk) return -1e30;
   int kvh = hd / (heads / kv); int qb = t * heads * dim / 4 + hd * dim / 4; int kb = j * kv * dim / 4 + kvh * dim / 4;
   float a = 0.0;
   for (int k = 0; k < dim / 4; k++) a += dot(tex4(Q, qb + k), tex4(K, kb + k));
@@ -212,18 +228,18 @@ void main() {
 }"""
   /** y[t, h, i..i+3] = softmax_j(s[t, h, j]) · v[j, kv(h), i..i+3] */
   val attend: String = head + """
-uniform sampler2D S; uniform sampler2D V; uniform int n; uniform int np; uniform int heads; uniform int kv;
-uniform int dim;
+uniform sampler2D S; uniform sampler2D V; uniform int n; uniform int nk; uniform int np; uniform int heads;
+uniform int kv; uniform int dim; uniform int pos0;
 void main() {
   int i = idx(); if (i >= total) discard;
   int c4 = heads * dim / 4; int t = i / c4; int c = (i - t * c4) * 4; int hd = c / dim; int d = c - hd * dim;
-  int kvh = hd / (heads / kv); int row = (t * heads + hd) * np;
+  int kvh = hd / (heads / kv); int row = (t * heads + hd) * np; int last = pos0 + t;
   float m = -1e30;
-  for (int j = 0; j <= t; j++) m = max(m, tex1(S, row + j));
+  for (int j = 0; j <= last; j++) m = max(m, tex1(S, row + j));
   float z = 0.0;
-  for (int j = 0; j <= t; j++) z += exp(tex1(S, row + j) - m);
+  for (int j = 0; j <= last; j++) z += exp(tex1(S, row + j) - m);
   vec4 acc = vec4(0.0);
-  for (int j = 0; j <= t; j++) acc += exp(tex1(S, row + j) - m) / z * tex4(V, j * kv * dim / 4 + kvh * dim / 4 + d / 4);
+  for (int j = 0; j <= last; j++) acc += exp(tex1(S, row + j) - m) / z * tex4(V, j * kv * dim / 4 + kvh * dim / 4 + d / 4);
   o = acc;
 }"""
   private def elementwise(expr: String) = head + s"""
@@ -238,3 +254,7 @@ void main() {
   val slice: String = head + """
 uniform sampler2D X; uniform int off;
 void main() { int i = idx(); if (i >= total) discard; o = tex4(X, i + off); }"""
+  /** the rows of A (na texels) then the rows of B */
+  val concat: String = head + """
+uniform sampler2D A; uniform sampler2D B; uniform int na;
+void main() { int i = idx(); if (i >= total) discard; o = i < na ? tex4(A, i) : tex4(B, i - na); }"""

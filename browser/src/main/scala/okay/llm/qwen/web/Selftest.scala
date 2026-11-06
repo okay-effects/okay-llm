@@ -44,12 +44,24 @@ object Selftest:
       at = Seq(0, ids.length - 1)
       run = (c: Compute) =>
         val t0 = now(); val m = Qwen3Compute(c, st, config); val t1 = now()
-        m.forward(ids, config.layers, at, withLogits = true).map { case (states, logits) =>
+        m.forward(ids, config.layers, at, withLogits = true).flatMap { case (states, logits) =>
           val t2 = now()
           val next = logits.indexOf(logits.max)
           say(f"${c.api}: weights up ${(t1 - t0) / 1000}%.1f s, forward ${(t2 - t1) / 1000}%.1f s; next token $next " +
             s"'${tok.decode(Seq(next))}'")
-          (states, logits, next)
+          // THE CACHE'S LAW on this device: the first 12 tokens run and kept, the rest after them — the same states
+          // and logits as the whole at once
+          (for
+            (_, _, cache) <- m.run(ids.take(12), config.layers, Nil, withLogits = false, None, keep = true)
+            (s2, l2, _) <- m.run(ids, config.layers, at, withLogits = true, cache, keep = false)
+          yield
+            val sd = states.zip(s2).map((a, b) => a.zip(b).map((x, y) => math.abs(x - y)).max)
+            val ld = logits.zip(l2).map((x, y) => math.abs(x - y)).max
+            say(f"${c.api} cache vs whole: states' max abs diff ${sd.mkString(" ")}; logits' $ld%.4f; " +
+              s"next ${if l2.indexOf(l2.max) == next then "the same" else "DIFFERENT"}")
+            cache.foreach(_.free())
+            if !(sd.forall(_ < 0.05f) && ld < 0.1f) then throw IllegalStateException(s"${c.api}: the cache differs")
+            (states, logits, next))
         }
       cpu <- run(OnCpu())
       check = (name: String, got: (Vector[Array[Float]], Array[Float], Int)) =>

@@ -81,19 +81,25 @@ final class OnWebGpu private (device: js.Dynamic, val adapter: String)(using Exe
     val out = T(x.rows, x.cols, buffer(x.rows * x.cols * 4, STORAGE | COPY_SRC | COPY_DST))
     dispatch(normP, Seq(params(Seq(x.rows, x.cols), Seq(eps)), x.buffer, w.buffer, out.buffer), (x.rows + 63) / 64)
     out
-  def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float): T =
+  def headNormRope(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int): T =
     val out = T(x.rows, x.cols, buffer(x.rows * x.cols * 4, STORAGE | COPY_SRC | COPY_DST))
-    dispatch(ropeP, Seq(params(Seq(x.rows, heads, headDim), Seq(eps, theta)), x.buffer, w.buffer, out.buffer),
+    dispatch(ropeP, Seq(params(Seq(x.rows, heads, headDim, pos0), Seq(eps, theta)), x.buffer, w.buffer, out.buffer),
       (heads + 63) / 64, x.rows)
     out
-  def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int): T =
-    val n = q.rows
-    val scores = buffer(n * heads * n * 4, STORAGE)
-    val p = params(Seq(n, heads, kvHeads, headDim), Seq((1.0 / math.sqrt(headDim)).toFloat))
-    dispatch(scoresP, Seq(p, q.buffer, k.buffer, scores), (n + 63) / 64, n, heads)
+  def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int): T =
+    val n = q.rows; val nk = k.rows
+    require(nk == pos0 + n, s"k has $nk rows for $pos0 + $n")
+    val scores = buffer(n * heads * nk * 4, STORAGE)
+    val p = params(Seq(n, heads, kvHeads, headDim), Seq((1.0 / math.sqrt(headDim)).toFloat, pos0.toFloat))
+    dispatch(scoresP, Seq(p, q.buffer, k.buffer, scores), (nk + 63) / 64, n, heads)
     val out = T(n, heads * headDim, buffer(n * heads * headDim * 4, STORAGE | COPY_SRC | COPY_DST))
     dispatch(attendP, Seq(p, scores, v.buffer, out.buffer), (headDim + 63) / 64, n, heads)
-    destroyLater(scores, n * heads * n * 4)
+    destroyLater(scores, n * heads * nk * 4)
+    out
+  def concat(a: T, b: T): T =
+    val out = T(a.rows + b.rows, a.cols, buffer((a.rows + b.rows) * a.cols * 4, STORAGE | COPY_SRC | COPY_DST))
+    if a.rows > 0 then encoder().copyBufferToBuffer(a.buffer, 0, out.buffer, 0, a.rows * a.cols * 4)
+    if b.rows > 0 then encoder().copyBufferToBuffer(b.buffer, 0, out.buffer, a.rows * a.cols * 4, b.rows * b.cols * 4)
     out
   def add(a: T, b: T): T = elementwise(addP, a, b)
   def swiglu(gate: T, up: T): T = elementwise(swigluP, gate, up)
@@ -177,7 +183,7 @@ object Wgsl:
 @group(0) @binding(2) var<storage, read> w: array<f32>;
 @group(0) @binding(3) var<storage, read_write> y: array<f32>;
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let hd = id.x; let r = id.y; let heads = p.a.y; let dim = p.a.z;
+  let hd = id.x; let r = id.y; let heads = p.a.y; let dim = p.a.z; let pos = f32(p.a.w + r);
   if (hd >= heads) { return; }
   let base = r * heads * dim + hd * dim; let half = dim / 2u;
   var ss = 0.0;
@@ -185,7 +191,7 @@ object Wgsl:
   let s = 1.0 / sqrt(ss / f32(dim) + p.b.x);
   for (var i = 0u; i < half; i++) {
     let x1 = x[base + i] * s * w[i]; let x2 = x[base + half + i] * s * w[half + i];
-    let a = f32(r) * pow(p.b.y, -2.0 * f32(i) / f32(dim));
+    let a = pos * pow(p.b.y, -2.0 * f32(i) / f32(dim));
     let c = cos(a); let sn = sin(a);
     y[base + i] = x1 * c - x2 * sn; y[base + half + i] = x2 * c + x1 * sn;
   }
@@ -197,9 +203,10 @@ object Wgsl:
 @group(0) @binding(3) var<storage, read_write> s: array<f32>;
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let j = id.x; let t = id.y; let hd = id.z; let n = p.a.x; let heads = p.a.y; let kv = p.a.z; let dim = p.a.w;
-  if (j >= n) { return; }
-  let at = (t * heads + hd) * n + j;
-  if (j > t) { s[at] = -1e30; return; }
+  let pos0 = u32(p.b.y); let nk = pos0 + n;
+  if (j >= nk) { return; }
+  let at = (t * heads + hd) * nk + j;
+  if (j > pos0 + t) { s[at] = -1e30; return; }
   let kvh = hd / (heads / kv);
   var acc = 0.0;
   for (var i = 0u; i < dim; i++) { acc += q[t * heads * dim + hd * dim + i] * k[j * kv * dim + kvh * dim + i]; }
@@ -213,13 +220,14 @@ object Wgsl:
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x; let t = id.y; let hd = id.z; let n = p.a.x; let heads = p.a.y; let kv = p.a.z; let dim = p.a.w;
   if (i >= dim) { return; }
-  let row = (t * heads + hd) * n; let kvh = hd / (heads / kv);
+  let pos0 = u32(p.b.y); let nk = pos0 + n; let last = pos0 + t;
+  let row = (t * heads + hd) * nk; let kvh = hd / (heads / kv);
   var m = -1e30;
-  for (var j = 0u; j <= t; j++) { m = max(m, s[row + j]); }
+  for (var j = 0u; j <= last; j++) { m = max(m, s[row + j]); }
   var z = 0.0;
-  for (var j = 0u; j <= t; j++) { z += exp(s[row + j] - m); }
+  for (var j = 0u; j <= last; j++) { z += exp(s[row + j] - m); }
   var acc = 0.0;
-  for (var j = 0u; j <= t; j++) { acc += exp(s[row + j] - m) / z * v[j * kv * dim + kvh * dim + i]; }
+  for (var j = 0u; j <= last; j++) { acc += exp(s[row + j] - m) / z * v[j * kv * dim + kvh * dim + i]; }
   y[t * heads * dim + hd * dim + i] = acc;
 }"""
   private def elementwise(expr: String) = head + s"""

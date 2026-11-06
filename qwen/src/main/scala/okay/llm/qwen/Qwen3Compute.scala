@@ -33,32 +33,61 @@ final class Qwen3Compute(val c: Compute, st: Safetensors, val config: Qwen3Confi
   private val head: c.W = c.quantized(embedding)
   private val norm: c.T = { val a = st.floats("model.norm.weight"); c.tensor(1, a.length, a) }
 
+  /** A PREFIX ALREADY RUN: its length, every layer's k and v on the device (the rows 0 until n), the residual after
+   * `layer` for those rows — so a sequence that begins with it runs only the rest. Freed by `free` */
+  final class Cache(val n: Int, val k: Vector[c.T], val v: Vector[c.T], val h: c.T, val layer: Int):
+    def free(): Unit = { k.foreach(c.release); v.foreach(c.release); c.release(h) }
+
   /** the residual after `layer` at the rows `at` (none when `layer` is 0), and the next token's logits if asked */
   def forward(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean)(using ExecutionContext)
       : Future[(Vector[Array[Float]], Array[Float])] =
-    val n = ids.length
-    var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(ids(k / hidden), k % hidden)))
-    var states: Future[Vector[Array[Float]]] = Future.successful(Vector.empty)
-    for (l, li) <- blocks.zipWithIndex do
-      val x = c.rmsNorm(h, l.inNorm, eps)
-      val q0 = c.linear(x, l.q); val k0 = c.linear(x, l.k); val v = c.linear(x, l.v); c.release(x)
-      val q = c.headNormRope(q0, l.qNorm, heads, headDim, eps, ropeTheta); c.release(q0)
-      val k = c.headNormRope(k0, l.kNorm, kvHeads, headDim, eps, ropeTheta); c.release(k0)
-      val a = c.attention(q, k, v, heads, kvHeads, headDim); c.release(q); c.release(k); c.release(v)
-      val o = c.linear(a, l.o); c.release(a)
-      val h1 = c.add(h, o); c.release(h); c.release(o)
-      val y = c.rmsNorm(h1, l.postNorm, eps)
-      val g = c.linear(y, l.gate); val u = c.linear(y, l.up); c.release(y)
-      val act = c.swiglu(g, u); c.release(g); c.release(u)
-      val d = c.linear(act, l.down); c.release(act)
-      h = c.add(h1, d); c.release(h1); c.release(d)
-      if li + 1 == layer then states = c.rows(h, at)
-    val fin = c.rmsNorm(h, norm, eps); c.release(h)
-    val logits =
-      if withLogits then
-        val last = c.slice(fin, n - 1, n); val lg = c.linear(last, head); c.release(last)
-        val read = c.rows(lg, Seq(0)); c.release(lg)
-        read.map(_.head)
-      else Future.successful(Array.empty[Float])
-    c.release(fin)
-    for s <- states; l <- logits yield (s, l)
+    run(ids, layer, at, withLogits, None, keep = false).map((s, l, _) => (s, l))
+
+  /** the same, after a cached prefix (`ids` begins with it: only the rest is run), and — `keep` — the whole of `ids`
+   * cached for the next call; a cache given and not kept stays as it was */
+  def run(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean, cache: Option[Cache], keep: Boolean)(
+      using ExecutionContext): Future[(Vector[Array[Float]], Array[Float], Option[Cache])] =
+    val n0 = cache.fold(0)(_.n)
+    require(n0 <= ids.length, "the cached prefix is longer than the sequence")
+    require(cache.forall(_.layer == layer) || at.forall(_ >= n0), "the cache holds another layer's states")
+    val suffix = ids.drop(n0); val n = suffix.length
+    val (before, after) = at.partition(_ < n0)
+    val fromCache: Future[Vector[Array[Float]]] =
+      if before.isEmpty then Future.successful(Vector.empty) else c.rows(cache.get.h, before)
+    if n == 0 then
+      // nothing new: the states from the cache; no logits (a prefix's last token has none worth asking)
+      fromCache.map(s => (s, Array.empty[Float], if keep then cache else None))
+    else
+      var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(suffix(k / hidden), k % hidden)))
+      var states: Future[Vector[Array[Float]]] = Future.successful(Vector.empty)
+      val ks = Vector.newBuilder[c.T]; val vs = Vector.newBuilder[c.T]
+      var kept: Option[c.T] = None
+      for (l, li) <- blocks.zipWithIndex do
+        val x = c.rmsNorm(h, l.inNorm, eps)
+        val q0 = c.linear(x, l.q); val k0 = c.linear(x, l.k); val v = c.linear(x, l.v); c.release(x)
+        val q = c.headNormRope(q0, l.qNorm, heads, headDim, eps, ropeTheta, n0); c.release(q0)
+        val k = c.headNormRope(k0, l.kNorm, kvHeads, headDim, eps, ropeTheta, n0); c.release(k0)
+        // the keys and values of the whole sequence: the prefix's from the cache, then the new ones
+        val (kAll, vAll) = cache.fold((k, v))(cc => { val ka = c.concat(cc.k(li), k); val va = c.concat(cc.v(li), v); c.release(k); c.release(v); (ka, va) })
+        val a = c.attention(q, kAll, vAll, heads, kvHeads, headDim, n0); c.release(q)
+        if keep then { ks += kAll; vs += vAll } else { c.release(kAll); c.release(vAll) }
+        val o = c.linear(a, l.o); c.release(a)
+        val h1 = c.add(h, o); c.release(h); c.release(o)
+        val y = c.rmsNorm(h1, l.postNorm, eps)
+        val g = c.linear(y, l.gate); val u = c.linear(y, l.up); c.release(y)
+        val act = c.swiglu(g, u); c.release(g); c.release(u)
+        val d = c.linear(act, l.down); c.release(act)
+        h = c.add(h1, d); c.release(h1); c.release(d)
+        if li + 1 == layer then
+          states = c.rows(h, after.map(_ - n0))
+          if keep then kept = Some(cache.fold(c.slice(h, 0, n))(cc => c.concat(cc.h, h)))
+      val fin = c.rmsNorm(h, norm, eps); c.release(h)
+      val logits =
+        if withLogits then
+          val last = c.slice(fin, n - 1, n); val lg = c.linear(last, head); c.release(last)
+          val read = c.rows(lg, Seq(0)); c.release(lg)
+          read.map(_.head)
+        else Future.successful(Array.empty[Float])
+      c.release(fin)
+      val next = if keep then Some(Cache(ids.length, ks.result(), vs.result(), kept.getOrElse(c.tensor(0, hidden, Array.empty)), layer)) else None
+      for cached <- fromCache; s <- states; l <- logits yield (cached ++ s, l, next)
