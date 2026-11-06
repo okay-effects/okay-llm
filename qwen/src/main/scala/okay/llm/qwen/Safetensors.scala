@@ -91,8 +91,8 @@ object Safetensors:
 
   /** THE FILE SPLIT for a page: files of at most `limit` bytes, whole tensors in the file's order — the embedding and
    * the norm first, then the layers; each a safetensors file of its own (`Tensors.Many` reads them as one) */
-  def split(st: Safetensors, limit: Int): Vector[Array[Byte]] =
-    val names = st.entries.keys.toVector.sortBy { n =>
+  def split(st: Safetensors, limit: Int, skip: String => Boolean = _ => false): Vector[Array[Byte]] =
+    val names = st.entries.keys.toVector.filterNot(skip).sortBy { n =>
       val layer = "model\\.layers\\.(\\d+)\\..*".r
       n match { case layer(i) => (1, i.toInt, n); case _ => (0, 0, n) } }
     val files = Vector.newBuilder[Array[Byte]]
