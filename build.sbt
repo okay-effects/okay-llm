@@ -36,7 +36,7 @@ lazy val core = crossProject(JVMPlatform, NativePlatform, JSPlatform).crossType(
   .jvmSettings(jvmNative)
   .nativeSettings(jvmNative)
 
-lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects).map(p => p: ProjectReference) :+ (browser: ProjectReference): _*)
+lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects).map(p => p: ProjectReference) :+ (browser: ProjectReference) :+ (mlx: ProjectReference): _*)
   .settings(publish / skip := true)
 
 /** the sources of the JVM and Scala Native, not of Scala.js: core/src/{main,test}/scala-jvm-native */
@@ -59,3 +59,12 @@ lazy val qwen = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).
 lazy val browser = project.in(file("browser")).enablePlugins(ScalaJSPlugin).dependsOn(qwen.js)
   .settings(name := "okay-llm-qwen-browser", scalaJSUseMainModuleInitializer := true,
     Compile / mainClass := Some("okay.llm.qwen.web.Selftest"))
+
+/** THE FOURTH HANDLER OF `Compute`: Apple's GPU through mlx-scala (the JVM runs the same forward as the browser).
+ * `QWEN_DIR=<model dir> sbt mlx/test` (OnMlx == OnCpu); the native library from `MLX_SCALA_LIB` or ../mlx-scala */
+val mlxNativeLib = sys.env.get("MLX_SCALA_LIB").map(file).getOrElse(file("../mlx-scala/native-lib/out/lib")).getCanonicalFile
+lazy val mlx = project.in(file("mlx")).dependsOn(qwen.jvm)
+  .settings(name := "okay-llm-qwen-mlx",
+    resolvers += "mlx-scala" at "https://sergey-scherbina.github.io/mlx-scala/maven",
+    libraryDependencies ++= Seq("io.github.sergey-scherbina" %% "mlx-scala" % "0.1.0", "org.scalameta" %% "munit" % "1.2.3" % Test),
+    Test / fork := true, Test / javaOptions ++= Seq("--enable-native-access=ALL-UNNAMED", s"-Dokm.lib=$mlxNativeLib/libokm.dylib", "-Xmx4g", "-Xss16m"))

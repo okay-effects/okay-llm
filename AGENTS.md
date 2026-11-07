@@ -27,3 +27,11 @@ Build: `sbt test`, `sbt publishLocal` (okay-mlx depends on it). Lines at most 12
 - Laws: `QWEN_DIR=<model dir> sbt qwenJVM/test` (OnCpu == Qwen3Forward); `scripts/selftest.sh` (WebGPU and WebGL2
   against the CPU in Chromium, the model copied from the HuggingFace cache; `MODEL_DIR` to pick another).
 - Shaders: `half` is reserved in GLSL ES; loops with uniform bounds are fine in ES 3.00.
+
+## mlx (2026-11-07)
+
+- `mlx` (JVM, artifact okay-llm-qwen-mlx): `OnMlx` — `Compute` on Apple's GPU through mlx-scala, the fourth handler
+  of the one forward (`Qwen3Compute`): quantized matmul in MLX's layout, rms_norm, rope, matmul + softmax with a
+  causal mask of the positions. The JVM runs the same program as the browser; mlx-scala's own forward is not needed
+  for reading. Law: `QWEN_DIR=<model dir> sbt mlx/test` (OnMlx == OnCpu: states within 1e-3 of their scale, the
+  same next token; the cached prefix then the rest == the whole). Needs the native library (`MLX_SCALA_LIB`).
