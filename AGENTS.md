@@ -21,6 +21,9 @@ Build: `sbt test`, `sbt publishLocal` (okay-mlx depends on it). Lines at most 12
   `Qwen3Config` (the architecture as data: sizes, rope, eps; the FILE decides the rest: a layer's parts present or not, the head tied or its own `lm_head`), `Tokenizer`/`Nfc` (Nfc split by platform: tables on the JVM, the
   string's `normalize` on JS), `Compute` — the device as a trait (tensor, quantized, linear, rmsNorm, headNormRope,
   attention, add, swiglu, slice, rows, release) — with `OnCpu`; `Qwen3Compute` the forward over any `Compute`.
+- `browser` also has `Loader` (okay.llm.qwen.web, 2026-11-07): a model into a page — config, tokenizer, the
+  weights' parts only up to the layer read (`upTo`), the embedding's blocks by script (more on `ensure`), the Cache
+  API, the device chosen (WebGPU, else WebGL2 — small on a phone —, else the CPU). Elysion's small judge uses it.
 - `browser` (Scala.js, artifact okay-llm-qwen-browser): `OnWebGpu` (WGSL compute, one encoder submitted at a
   readback, released buffers destroyed after the work is done) and `OnWebGl2` (fragment shaders over textures
   2048 wide in a linear layout, words as RGBA32UI); `Selftest` is the page's main (browser/index.html).
