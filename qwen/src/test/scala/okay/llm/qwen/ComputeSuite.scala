@@ -6,27 +6,27 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Await
 import scala.concurrent.duration.*
 
-/** THE LAW OF THE PROGRAM OVER `Compute`: on the CPU handler it says what `Qwen3Forward` says — the states after a
- * layer and the logits. On a model from `$QWEN_DIR` (config.json, model.safetensors); skipped without one. */
-class ComputeSuite extends munit.FunSuite:
+/** THE HEAD THE FILE HAS: a file with its own `lm_head` (here a copy of the embedding) gives the logits of the tied
+ * one — on the device and on the CPU head alike. On a model from `$QWEN_DIR`; skipped without one. */
+class UntiedHeadSuite extends munit.FunSuite:
   override val munitTimeout = 10.minutes
-  test("Qwen3Compute on OnCpu == Qwen3Forward") {
+  test("an untied head that copies the embedding == the tied head") {
     val dir = sys.env.get("QWEN_DIR").map(java.nio.file.Path.of(_))
     assume(dir.isDefined, "QWEN_DIR not set")
-    val st = Safetensors(java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors")))
+    val bytes = java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors"))
+    val st = Safetensors(bytes)
     val config = Qwen3Config.parse(java.nio.file.Files.readString(dir.get.resolve("config.json")))
     val ids = Array(151644, 872, 198, 4340, 1657, 6978, 614, 3146, 284, 9625, 30, 151645, 198, 151644, 77091, 198)
-    val layer = math.min(config.layers, 19)
-    val plain = Qwen3Forward(st, config)
-    val (states, last) = plain.run(ids, Set(layer))
-    val logits = plain.logits(last)
-    val over = Qwen3Compute(OnCpu(), st, config)
-    val (got, gotLogits) = Await.result(over.forward(ids, layer, Seq(0, ids.length - 1), withLogits = true), 10.minutes)
-    val diff = Seq(0, ids.length - 1).zip(got).map((i, g) => states(layer)(i).zip(g).map((a, b) => math.abs(a - b)).max)
-    val ldiff = logits.zip(gotLogits).map((a, b) => math.abs(a - b)).max
-    println(s"states' max abs diff ${diff.mkString(" ")}; logits' $ldiff; next ${logits.indexOf(logits.max)} vs ${gotLogits.indexOf(gotLogits.max)}")
-    assert(diff.forall(_ < 1e-2f), diff); assert(ldiff < 1e-2f, ldiff)
-    assertEquals(logits.indexOf(logits.max), gotLogits.indexOf(gotLogits.max))
+    val names = st.entries.keys.toVector.sorted
+    val copied = Safetensors(Safetensors.write(names.map(n => (n, st.entries(n).dtype, st.entries(n).shape, st.raw(n))) ++
+      Vector("weight", "scales", "biases").map(p => (s"lm_head.$p", st.entries(s"model.embed_tokens.$p").dtype, st.entries(s"model.embed_tokens.$p").shape, st.raw(s"model.embed_tokens.$p")))))
+    assert(copied.has("lm_head.weight"))
+    for onCpu <- Vector(false, true) do
+      val tied = Await.result(Qwen3Compute(OnCpu(), st, config, headOnCpu = onCpu).forward(ids, 0, Nil, withLogits = true), 10.minutes)._2
+      val own = Await.result(Qwen3Compute(OnCpu(), copied, config, headOnCpu = onCpu).forward(ids, 0, Nil, withLogits = true), 10.minutes)._2
+      val diff = tied.zip(own).map((a, b) => math.abs(a - b)).max
+      println(s"untied vs tied (head on cpu $onCpu): max abs diff $diff")
+      assert(diff < 1e-3f, diff)
   }
 
 /** THE CACHE'S LAW: a prefix run and kept, then the rest after it — the same states and logits as the whole run at

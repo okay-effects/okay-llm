@@ -18,13 +18,13 @@ Build: `sbt test`, `sbt publishLocal` (okay-mlx depends on it). Lines at most 12
 ## qwen and browser (2026-11-05)
 
 - `qwen` (JVM, Scala.js; package `okay.llm.qwen` and `okay.llm.compute`): `Safetensors` (MLX's 4-bit layout),
-  `Qwen3Forward` (plain Scala, the truth), `Tokenizer`/`Nfc` (Nfc split by platform: tables on the JVM, the
+  `Qwen3Config` (the architecture as data: sizes, rope, eps; the FILE decides the rest: a layer's parts present or not, the head tied or its own `lm_head`), `Tokenizer`/`Nfc` (Nfc split by platform: tables on the JVM, the
   string's `normalize` on JS), `Compute` — the device as a trait (tensor, quantized, linear, rmsNorm, headNormRope,
   attention, add, swiglu, slice, rows, release) — with `OnCpu`; `Qwen3Compute` the forward over any `Compute`.
 - `browser` (Scala.js, artifact okay-llm-qwen-browser): `OnWebGpu` (WGSL compute, one encoder submitted at a
   readback, released buffers destroyed after the work is done) and `OnWebGl2` (fragment shaders over textures
   2048 wide in a linear layout, words as RGBA32UI); `Selftest` is the page's main (browser/index.html).
-- Laws: `QWEN_DIR=<model dir> sbt qwenJVM/test` (OnCpu == Qwen3Forward); `scripts/selftest.sh` (WebGPU and WebGL2
+- Laws: `QWEN_DIR=<model dir> sbt qwenJVM/test` (the cache, the head, the split, the blocks, the skipped parts; an untied head copying the embedding == the tied) and `sbt mlx/test` (OnMlx == OnCpu, the independent implementation); `scripts/selftest.sh` (WebGPU and WebGL2
   against the CPU in Chromium, the model copied from the HuggingFace cache; `MODEL_DIR` to pick another).
 - Shaders: `half` is reserved in GLSL ES; loops with uniform bounds are fine in ES 3.00.
 

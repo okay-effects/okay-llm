@@ -5,7 +5,7 @@ import okay.llm.compute.Compute
 import scala.concurrent.{ExecutionContext, Future}
 
 /**
- * QWEN3'S FORWARD AS A PROGRAM OVER `Compute`: the same words as `Qwen3Forward` — the embedding gathered on the CPU
+ * QWEN3'S FORWARD AS A PROGRAM OVER `Compute`: the one forward (the plain-Scala `Qwen3Forward` it once mirrored is gone; `OnCpu` is the reference, `OnMlx` the independent check) — as `Qwen3Forward` — the embedding gathered on the CPU
  * (one row a token), then for each layer the norm, q k v, the heads normed and rotated, attention, the output
  * projection and the residual, the norm, gate and up, SwiGLU, down and the residual; the final norm; the logits of
  * the last row against the tied head. The weights go to the device once, at construction. What a skill needs: the
@@ -41,7 +41,10 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
     (layersRead, embedGiven.getOrElse(Rows.Full(st.linear("model.embed_tokens"))))
   // the head: the loaded rows on the device, and the id of each; made again when rows are added
   private var head: Option[(c.W, Array[Int])] = None
-  def rehead(): Unit = if !headOnCpu then { val (q, ids) = embedding.packed; head = Some((c.quantized(q), ids)) }
+  // THE HEAD THE FILE HAS: its own `lm_head` (untied), else the embedding's rows (tied)
+  private val untied: Option[okay.llm.compute.QLinear] = Option.when(st.has("lm_head.weight"))(st.linear("lm_head"))
+  def rehead(): Unit = if !headOnCpu then
+    head = Some(untied.fold { val (q, ids) = embedding.packed; (c.quantized(q), ids) }(u => (c.quantized(u), Array.tabulate(u.out)(identity))))
   rehead()
   private val norm: c.T = { val a = st.floats("model.norm.weight"); c.tensor(1, a.length, a) }
 
@@ -112,7 +115,7 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
             read.map { rows =>
               val out = Array.fill(vocab)(Float.NegativeInfinity)
               ids.zipWithIndex.foreach((id, k) => out(id) = rows.head(k)); out }
-          case None => c.rows(fin, Seq(n - 1)).map(rows => embedding.logits(rows.head))
+          case None => c.rows(fin, Seq(n - 1)).map(rows => untied.fold(embedding.logits(rows.head))(_(rows.head)))
         else Future.successful(Array.empty[Float])
       c.release(fin)
       val next = if keep then Some(Cache(ids.length, ks.result(), vs.result(), kept.getOrElse(c.tensor(0, hidden, Array.empty)), layer)) else None

@@ -36,11 +36,15 @@ final class OnMlx extends Compute:
     val kh = Mlx.reshape(Mlx.transpose(Mlx.reshape(k, kRows, kvHeads, headDim), 1, 0, 2), kvHeads, 1, kRows, headDim)
     val vh = Mlx.reshape(Mlx.transpose(Mlx.reshape(v, kRows, kvHeads, headDim), 1, 0, 2), kvHeads, 1, kRows, headDim)
     val scores = Mlx.multiply(Mlx.matmul(qh, Mlx.transpose(kh, 0, 1, 3, 2)), Mlx.scalar(1f / math.sqrt(headDim.toDouble).toFloat))
-    // causal: the query at pos0 + i sees the keys at positions up to it
-    val mask = Mlx.floats(Array.tabulate(rows * kRows)(i => if i % kRows <= pos0 + i / kRows then 0f else Float.NegativeInfinity), rows, kRows)
+    val mask = causal(rows, kRows, pos0)
     val probs = Mlx.softmax(Mlx.add(scores, mask), -1)
     val out = Mlx.matmul(probs, vh) // kvHeads × rep × rows × headDim
     Mlx.reshape(Mlx.transpose(Mlx.reshape(out, heads, rows, headDim), 1, 0, 2), rows, heads * headDim)
+  // causal: the query at pos0 + i sees the keys at positions up to it; one mask per shape, kept (a reading asks the
+  // same shapes again and again)
+  private val masks = scala.collection.mutable.Map.empty[(Int, Int, Int), Arr]
+  private def causal(rows: Int, kRows: Int, pos0: Int): Arr = masks.getOrElseUpdate((rows, kRows, pos0),
+    Mlx.floats(Array.tabulate(rows * kRows)(i => if i % kRows <= pos0 + i / kRows then 0f else Float.NegativeInfinity), rows, kRows))
   def concat(a: T, b: T): T = Mlx.concatenate(Seq(a, b), 0)
   def add(a: T, b: T): T = Mlx.add(a, b)
   def swiglu(gate: T, up: T): T = Mlx.multiply(Mlx.silu(gate), up)
