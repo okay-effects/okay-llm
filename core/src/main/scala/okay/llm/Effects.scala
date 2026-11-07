@@ -9,16 +9,27 @@ import okay.scala3.*
  * tools it may call, how many tokens at most, whether it thinks first; how tokens are drawn — each unset, the
  * model's own (a backend's default); the model the request names, if any (a backend of several picks by it); the
  * answer's format, if one is asked (OpenAI's `response_format`: `{"type": "json_schema", "json_schema": {…}}` — a
- * backend that cannot hold to it answers as it can) */
+ * backend that cannot hold to it answers as it can); exact quotes, if asked (`quote`: what the model puts between
+ * the markers is a span of the sources, token for token — a backend that cannot hold to it answers as it can) */
 final case class Ask(messages: Vector[Json], tools: Vector[Json] = Vector.empty, maxTokens: Int = 1024,
     thinking: Boolean = false, sampling: Sampling = Sampling(), model: Option[String] = None,
-    format: Option[Json] = None):
+    format: Option[Json] = None, quote: Option[Quote] = None):
   def copy(messages: Vector[Json] = messages, tools: Vector[Json] = tools, maxTokens: Int = maxTokens,
       thinking: Boolean = thinking, sampling: Sampling = sampling, model: Option[String] = model,
-      format: Option[Json] = format): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, format)
+      format: Option[Json] = format, quote: Option[Quote] = quote): Ask =
+    new Ask(messages, tools, maxTokens, thinking, sampling, model, format, quote)
   /** the copy of the release before `format`: code built on it links (its format kept) */
   def copy(messages: Vector[Json], tools: Vector[Json], maxTokens: Int, thinking: Boolean, sampling: Sampling,
-      model: Option[String]): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, format)
+      model: Option[String]): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, format, quote)
+
+/** EXACT QUOTES (okay-inlay specs/quotes.md), as a request asks them (`okay_quote`): between `open` and `close` the
+ * model can only copy a span of the `sources` (none given: of its prompt), token for token — it chooses what to
+ * quote, it cannot misquote. `{"okay_quote": {"open": "⟦", "close": "⟧", "sources": ["…", "…"]}}`, each optional */
+final case class Quote(open: String = "⟦", close: String = "⟧", sources: Vector[String] = Vector.empty)
+
+object Quote:
+  def of(j: Json): Quote = Quote(j.field("open").map(_.string).getOrElse("⟦"),
+    j.field("close").map(_.string).getOrElse("⟧"), j.field("sources").map(_.list.map(_.string)).getOrElse(Vector.empty))
 
 /** HOW TOKENS ARE DRAWN, as a request says: temperature (0: greedy), top_p, top_k, a seed, OpenAI's presence and
  * frequency penalties (against a loop); each unset, the backend's */
@@ -35,7 +46,11 @@ object Sampling:
 object Ask:
   /** the apply of the release before `format` (binary compatibility of code built on it) */
   def apply(messages: Vector[Json], tools: Vector[Json], maxTokens: Int, thinking: Boolean, sampling: Sampling,
-      model: Option[String]): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, None)
+      model: Option[String]): Ask = new Ask(messages, tools, maxTokens, thinking, sampling, model, None, None)
+  /** the apply of the release before `quote` */
+  def apply(messages: Vector[Json], tools: Vector[Json], maxTokens: Int, thinking: Boolean, sampling: Sampling,
+      model: Option[String], format: Option[Json]): Ask =
+    new Ask(messages, tools, maxTokens, thinking, sampling, model, format, None)
 
   /** a system message where a chat template takes none — after the first message (Claude Code sends one each turn,
    * mid-conversation; Qwen3.6's template raises) — as a user message, where it is. Not moved to the first: the
