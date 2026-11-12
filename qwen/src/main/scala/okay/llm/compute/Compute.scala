@@ -12,6 +12,10 @@ import scala.concurrent.Future
  * op has run.
  */
 trait Compute:
+  /** Release a dedicated model device before another model takes its place. */
+  def close(): Unit = ()
+  /** Transfer a tensor into long-lived prefix storage. The handler may consume the input. */
+  def cache(x: T): T = x
   type T
   type W
   def api: String

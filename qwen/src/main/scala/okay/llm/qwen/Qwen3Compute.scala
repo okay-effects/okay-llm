@@ -51,7 +51,21 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
   /** A PREFIX ALREADY RUN: its length, every layer's k and v on the device (the rows 0 until n), the residual after
    * `layer` for those rows — so a sequence that begins with it runs only the rest. Freed by `free` */
   final class Cache(val n: Int, val k: Vector[c.T], val v: Vector[c.T], val h: c.T, val layer: Int):
-    def free(): Unit = { k.foreach(c.release); v.foreach(c.release); c.release(h) }
+    private val released = Array.fill(k.size)(false)
+    private var statesReleased = false
+    private var consumed = false
+    private[Qwen3Compute] def requireLive(): Unit = require(!consumed, "the prefix cache was consumed or freed")
+    private[Qwen3Compute] def consume(): Unit = { requireLive(); consumed = true }
+    private[Qwen3Compute] def freeLayer(i: Int): Unit = if !released(i) then
+      released(i) = true
+      c.release(k(i)); c.release(v(i))
+    private[Qwen3Compute] def freeStates(): Unit = if !statesReleased then
+      statesReleased = true
+      c.release(h)
+    def free(): Unit =
+      consumed = true
+      k.indices.foreach(freeLayer)
+      freeStates()
 
   /** the residual after `layer` at the rows `at` (none when `layer` is 0), and the next token's logits if asked */
   def forward(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean)(using ExecutionContext)
@@ -62,6 +76,15 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
    * cached for the next call; a cache given and not kept stays as it was */
   def run(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean, cache: Option[Cache], keep: Boolean)(
       using ExecutionContext): Future[(Vector[Array[Float]], Array[Float], Option[Cache])] =
+    run(ids, layer, at, withLogits, cache, keep, consumeCache = false)
+
+  /** A decoder can transfer ownership of its old prefix; release each layer after its keys/values were copied.
+    * Other callers retain the reusable-cache contract of the six-argument overload.
+    */
+  def run(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean, cache: Option[Cache], keep: Boolean,
+      consumeCache: Boolean)(using ExecutionContext): Future[(Vector[Array[Float]], Array[Float], Option[Cache])] =
+    cache.foreach(_.requireLive())
+    require(!consumeCache || (cache.nonEmpty && keep), "consuming a cache requires a retained successor")
     val n0 = cache.fold(0)(_.n)
     require(n0 <= ids.length, "the cached prefix is longer than the sequence")
     require(cache.forall(_.layer == layer) || at.forall(_ >= n0), "the cache holds another layer's states")
@@ -73,6 +96,7 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
       // nothing new: the states from the cache; no logits (a prefix's last token has none worth asking)
       fromCache.map(s => (s, Array.empty[Float], if keep then cache else None))
     else
+      if consumeCache then cache.foreach(_.consume())
       var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(suffix(k / hidden), k % hidden)))
       var states: Future[Vector[Array[Float]]] = Future.successful(Vector.empty)
       val ks = Vector.newBuilder[c.T]; val vs = Vector.newBuilder[c.T]
@@ -87,11 +111,13 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
             val k = c.headNormRope(k0, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0); c.release(k0)
             // the keys and values of the whole sequence: the prefix's from the cache, then the new ones
             val (kAll, vAll) = cache.fold((k, v))(cc => { val ka = c.concat(cc.k(li), k); val va = c.concat(cc.v(li), v); c.release(k); c.release(v); (ka, va) })
+            if consumeCache then cache.foreach(_.freeLayer(li))
             val a = c.attention(q, kAll, vAll, heads, kvHeads, headDim, n0); c.release(q)
-            if keep then { ks += kAll; vs += vAll } else { c.release(kAll); c.release(vAll) }
+            if keep then { ks += c.cache(kAll); vs += c.cache(vAll) } else { c.release(kAll); c.release(vAll) }
             val o = c.linear(a, at.o); c.release(a)
             val h1 = c.add(h, o); c.release(h); c.release(o); h1
           case None =>
+            if consumeCache then cache.foreach(_.freeLayer(li))
             if keep then { ks += c.tensor(0, kvDim, Array.empty); vs += c.tensor(0, kvDim, Array.empty) }
             h
         // the MLP, if the layer has one
@@ -104,8 +130,9 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
             val h2 = c.add(h1, d); c.release(h1); c.release(d); h2
           case None => h1
         if li + 1 == layer then
-          states = c.rows(h, after.map(_ - n0))
+          if after.nonEmpty then states = c.rows(h, after.map(_ - n0))
           if keep then kept = Some(cache.fold(c.slice(h, 0, n))(cc => c.concat(cc.h, h)))
+          if consumeCache then cache.foreach(_.freeStates())
       val fin = c.rmsNorm(h, norm, eps); c.release(h)
       val logits =
         if withLogits then head match

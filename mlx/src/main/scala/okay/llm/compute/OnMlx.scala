@@ -67,4 +67,4 @@ final class OnMlx extends Compute:
     Future.successful(at.toVector.map(i => all.slice(i * cols, (i + 1) * cols))) }
   def release(x: T): Unit = s.release(x)
   /** every tensor freed */
-  def close(): Unit = s.close()
+  override def close(): Unit = s.close()

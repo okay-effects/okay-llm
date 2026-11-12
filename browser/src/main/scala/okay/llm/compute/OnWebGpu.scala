@@ -13,6 +13,9 @@ import scala.scalajs.js.typedarray.*
  */
 final class OnWebGpu private (device: js.Dynamic, val adapter: String)(using ExecutionContext) extends Compute:
   val api = "WebGPU"
+  override def close(): Unit =
+    device.destroy()
+    bytes = 0L
   final class T(val rows: Int, val cols: Int, val buffer: js.Dynamic)
   final class W(val out: Int, val in: Int, val words: js.Dynamic, val scales: js.Dynamic, val biases: js.Dynamic)
   private val STORAGE = 0x80; private val COPY_DST = 0x08; private val COPY_SRC = 0x04; private val UNIFORM = 0x40

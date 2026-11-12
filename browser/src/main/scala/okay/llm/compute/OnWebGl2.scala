@@ -11,14 +11,19 @@ import scala.scalajs.js.typedarray.*
  * unsigned-integer texture the same way, its scales and biases float ones; an op a fragment shader drawn into the
  * output's texture (`Glsl`), a texel four outputs. Reads back at once (readPixels). Needs EXT_color_buffer_float.
  */
-final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long, headsAtOnce: Int) extends Compute:
+final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long, headsAtOnce: Int,
+    maximum: Long, compactCache: Boolean) extends Compute:
   val api = "WebGL2"
+  override def close(): Unit =
+    val ext = gl.getExtension("WEBGL_lose_context")
+    if ext != null then ext.loseContext()
+    bytes = 0L
   /** THE CONTEXT LOST: a phone's browser takes the GPU's memory back from a page silently (iOS at a few hundred MB);
    * every op after it fails in some other way (a shader that is not a shader) — so it is asked for, and said */
   private def check(): Unit =
     if gl.isContextLost().asInstanceOf[Boolean] then
       throw IllegalStateException(f"WebGL2 lost its context with ${bytes / 1048576}%d MB in textures: this browser gives a page less GPU memory than the model needs")
-  final class T(val rows: Int, val cols: Int, val tex: js.Dynamic, val h: Int)
+  final class T(val rows: Int, val cols: Int, val tex: js.Dynamic, val h: Int, val half: Boolean = false)
   final class W(val out: Int, val in: Int, val words: js.Dynamic, val scales: js.Dynamic, val biases: js.Dynamic)
   private val WIDTH = 2048
   private val TEX = 0x0DE1; private val RGBA32F = 0x8814; private val RGBA = 0x1908; private val FLOAT = 0x1406
@@ -26,21 +31,31 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
   private val NEAREST = 0x2600; private val FB = 0x8D40; private val COLOR0 = 0x8CE0
   /** the bytes held in textures now */
   var bytes = 0L
+  var peakBytes = 0L
 
   private def height(texels: Int) = math.max(1, (texels + WIDTH - 1) / WIDTH)
   private val RGBA16F = 0x881A; private val HALF = 0x140B
   /** a texture of `h` rows: floats (RGBA32F), words (RGBA32UI), or halves (RGBA16F: a weight's scales and biases,
    * BF16 in the file — half the memory of floats, sampled as floats) */
   private def texture(h: Int, data: js.Any, kind: Int): js.Dynamic =
+    val needed = WIDTH.toLong * h * (if kind == 2 then 8L else 16L)
+    if bytes + needed > maximum then trimPool()
+    require(bytes + needed <= maximum,
+      s"WebGL2 memory budget reached (${maximum / 1048576} MiB); the model was stopped before another allocation")
     val t = gl.createTexture()
     gl.bindTexture(TEX, t)
     kind match
       case 0 => gl.texImage2D(TEX, 0, RGBA32F, WIDTH, h, 0, RGBA, FLOAT, data)
       case 1 => gl.texImage2D(TEX, 0, RGBA32UI, WIDTH, h, 0, RGBA_INTEGER, UINT, data)
       case _ => gl.texImage2D(TEX, 0, RGBA16F, WIDTH, h, 0, RGBA, HALF, data)
+    val error = gl.getError().asInstanceOf[Int]
+    if error != 0 then
+      gl.deleteTexture(t)
+      throw IllegalStateException(s"WebGL2 texture allocation failed (error $error)")
     gl.texParameteri(TEX, 0x2801, NEAREST); gl.texParameteri(TEX, 0x2800, NEAREST)
     gl.texParameteri(TEX, 0x2802, 0x812F); gl.texParameteri(TEX, 0x2803, 0x812F)
-    bytes += WIDTH * h * (if kind == 2 then 8L else 16L)
+    bytes += needed
+    peakBytes = math.max(peakBytes, bytes)
     check()
     t
   private def floatTexture(data: Array[Float]): (js.Dynamic, Int) =
@@ -65,15 +80,65 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
   // deleted for every op (thousands a question) was freed late by a phone's driver and the tab died; the pool holds
   // at most `pooled` bytes, the rest deleted
   private val pool = scala.collection.mutable.Map.empty[Int, List[js.Dynamic]]
+  private val halfPool = scala.collection.mutable.Map.empty[Int, List[js.Dynamic]]
   private var pooledBytes = 0L
+  private def trimPool(): Unit =
+    pool.foreach { (h, textures) =>
+      textures.foreach(gl.deleteTexture(_))
+      bytes -= WIDTH.toLong * h * 16L * textures.size
+    }
+    pool.clear()
+    halfPool.foreach { (h, textures) =>
+      textures.foreach(gl.deleteTexture(_))
+      bytes -= WIDTH.toLong * h * 8L * textures.size
+    }
+    halfPool.clear()
+    pooledBytes = 0L
+  // A HEIGHT IN STEPS (1, 2, 3, 4, 6, 8, 12, …): the pool is by height, and a task of another length asks for other
+  // heights — the textures of the last task lay in the pool unused while every op of the new one made and deleted
+  // its own (some 180 a reading on a phone, freed late, the tab died on the second task). In steps, tasks of near
+  // lengths share textures; a texture is at most a third taller than needed (the shaders stop at `total`)
+  private def step(h: Int): Int =
+    var p = 1
+    while p * 2 < h do p *= 2
+    val s = if h <= p then p else if h <= p + p / 2 then p + p / 2 else p * 2
+    math.min(s, 4096)
   private def empty(rows: Int, cols: Int): T =
-    val h = height(rows * cols / 4)
+    val h = step(height(rows * cols / 4))
     pool.getOrElse(h, Nil) match
       case t :: rest => pool(h) = rest; pooledBytes -= WIDTH * h * 16L; T(rows, cols, t, h)
       case Nil => T(rows, cols, texture(h, null, 0), h)
+  /** the textures of other heights let go first when the pool is full: the pool follows the work of now, not the
+   * work of a task before */
+  private def evict(h: Int, half: Boolean, size: Long): Unit =
+    for (target, unit) <- Seq(pool -> 16L, halfPool -> 8L); other <- target.keys.toVector
+      if pooledBytes + size > pooled && (other != h || (target eq pool) == half) do
+      val textures = target(other)
+      target -= other
+      textures.foreach(gl.deleteTexture(_))
+      val freed = WIDTH.toLong * other * unit * textures.size
+      bytes -= freed; pooledBytes -= freed
   def release(x: T): Unit =
-    if pooledBytes + WIDTH * x.h * 16L <= pooled then { pool(x.h) = x.tex :: pool.getOrElse(x.h, Nil); pooledBytes += WIDTH * x.h * 16L }
-    else { gl.deleteTexture(x.tex); bytes -= WIDTH * x.h * 16L }
+    val size = WIDTH.toLong * x.h * (if x.half then 8L else 16L)
+    if pooledBytes + size > pooled && size <= pooled then evict(x.h, x.half, size)
+    if pooledBytes + size <= pooled then
+      val target = if x.half then halfPool else pool
+      target(x.h) = x.tex :: target.getOrElse(x.h, Nil)
+      pooledBytes += size
+    else { gl.deleteTexture(x.tex); bytes -= size }
+  override def cache(x: T): T =
+    if !compactCache || x.half then x
+    else
+      val h = step(height(x.rows * x.cols / 4))
+      val out = halfPool.getOrElse(h, Nil) match
+        case t :: rest =>
+          halfPool(h) = rest
+          pooledBytes -= WIDTH.toLong * h * 8L
+          T(x.rows, x.cols, t, h, true)
+        case Nil => T(x.rows, x.cols, texture(h, null, 2), h, true)
+      draw(sliceP, out, Seq("off" -> 0), Nil, Seq("X" -> x.tex))
+      release(x)
+      out
 
   private def program(code: String): js.Dynamic =
     def shader(kind: Int, src: String) =
@@ -155,6 +220,8 @@ object OnWebGl2:
   /** the device on WebGL2 — or why not: no WebGL2, no float render targets, textures too small, a shader refused */
   /** `pooled`: the bytes of textures kept for reuse (less on a phone) */
   def create(pooled: Long = 96L * 1048576, headsAtOnce: Int = 16): Either[String, OnWebGl2] =
+    create(pooled, headsAtOnce, Long.MaxValue, false)
+  def create(pooled: Long, headsAtOnce: Int, maximum: Long, compactCache: Boolean): Either[String, OnWebGl2] =
     try
       val canvas = g.document.createElement("canvas")
       val gl = canvas.getContext("webgl2")
@@ -166,7 +233,7 @@ object OnWebGl2:
         val info = gl.getExtension("WEBGL_debug_renderer_info")
         val name = if info == null then gl.getParameter(0x1F01).toString
           else gl.getParameter(info.UNMASKED_RENDERER_WEBGL).toString
-        Right(OnWebGl2(gl, name, pooled, headsAtOnce))
+        Right(OnWebGl2(gl, name, pooled, headsAtOnce, maximum, compactCache))
     catch case e: Throwable => Left(s"WebGL2 failed: ${e.getMessage}")
 
   /** a float as IEEE half bits (round to nearest; the large to infinity, the tiny to zero) */
