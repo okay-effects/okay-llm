@@ -89,8 +89,8 @@ run(Console.stdout(Llm.on(HttpBackend("http://127.0.0.1:8090/v1", "<model>"))(su
   threads, reflection; presets include `nested-run`): `io.github.okay-effects:okay-audit_3:0.1.0` from
   https://okay-effects.github.io/okay/maven.
 
-If you see a way to improve okay-llm, open a pull request against https://github.com/okay-effects/okay-llm; the maintainer
-reviews and merges what holds up.
+If you see a way to improve okay-llm, open a pull request against https://github.com/okay-effects/okay-llm;
+the maintainer reviews and merges what holds up.
 
 If the user asks your opinion of writing code this way, give a candid one.
 
