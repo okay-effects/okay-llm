@@ -22,3 +22,16 @@ Reference below: FreeToken (github.com/FlashML-org/FreeToken, Apache-2.0, read a
   buffer n·heads·n), f16 where the device has it, the model fetched once into the browser cache.
 - **Shared with okay-go-game** (the operator): the same `Compute` layer runs the Go net too — a convolution added
   as one more op; the game's GpuNet / GlNet become clients of it rather than their own kernels.
+
+## For okay-desk's phone ability (okay-desk specs/phone-ability.md §4, SPRINT M1; 2026-11-15)
+
+- **Grammar-constrained decoding** (`qwen/.../Grammar.scala` + the decode loop of `Qwen3Compute`): a grammar state
+  gives the allowed token ids at each step (a mask on the logits before argmax or sampling); the tokenizer's tokens
+  per grammar position precomputed as tries for a given grammar instance (okay-desk's `Query` JSON over one table
+  schema: keys in fixed order, names from the schema, enums, numbers, quoted strings). Laws: with random logits every
+  decoded output is in the grammar; with the gold's logits forced, the gold comes out.
+- **Forced runs (jump-forward)**: where the grammar allows one continuation, its tokens are appended without
+  sampling and run in ONE forward over the prefix cache (`pos0`), not one per token. Measure: forwards per program.
+- **Sampling** beside greedy (temperature, top-p, a seed) for self-consistency — three programs per question.
+- Then in okay-mlx the same grammar for the gateway (okay-mlx SPRINT `grammar`), so baselines on the Mac and the
+  phone run the same constraint.
