@@ -153,7 +153,8 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
    * prefix, attending to the prefix and to its own earlier rows only; the rows of all the segments go through every
    * linear together, so the weights are read once for all the options (decoding is bound by reading them). Each
    * option's mean log-probability of its tokens. The cache is read, not changed. */
-  def score(cache: Cache, last: Int, options: Vector[Array[Int]])(using ExecutionContext): Future[Vector[Double]] =
+  def score(cache: Cache, last: Int, options: Vector[Array[Int]], within: Boolean = false)(using ExecutionContext)
+      : Future[Vector[Double]] =
     cache.requireLive()
     val ns = options.map(_.length)
     require(ns.forall(_ > 0), "an option of no tokens")
@@ -190,6 +191,22 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
     // rows at a time read back (a token the head has not is impossible: −∞)
     val targets = options.flatMap(_.toVector).toArray
     val chunk = 32
+    // WITHIN THE CHOICE'S TOKENS (`within`): the log-softmax over the tokens the options are made of — the distribution
+    // of decoding constrained to them; the head a few hundred rows, dequantized on the CPU, the states read back (a
+    // phone has no room for the vocabulary's head on its device, and 152k rows a state on its CPU are minutes)
+    if within then
+      val ids = targets.distinct
+      val at = ids.zipWithIndex.toMap
+      val head = ids.map(id => Array.tabulate(hidden)(i => untied.fold(embedding.at(id, i))(_.at(id, i))))
+      val read = c.rows(fin, 0 until n); c.release(fin)
+      return read.map { rows =>
+        val lp = rows.zipWithIndex.map { (row, r) =>
+          val logits = head.map { w => var s = 0.0; var i = 0; while i < hidden do { s += w(i) * row(i); i += 1 }; s }
+          val m = logits.max; val z = logits.iterator.map(x => math.exp(x - m)).sum
+          logits(at(targets(r))) - m - math.log(z)
+        }
+        options.indices.map(j => lp.slice(starts(j), starts(j + 1)).sum / ns(j)).toVector
+      }
     def logProbs(rows: Vector[Array[Float]], from: Int, column: Int => Int): Vector[Double] =
       rows.zipWithIndex.map { (row, i) =>
         val m = row.max; val z = row.iterator.map(x => math.exp((x - m).toDouble)).sum

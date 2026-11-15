@@ -74,14 +74,28 @@ trait Rows:
   def logits(x: Array[Float]): Array[Float]
   /** the loaded rows as one weight for a device, and the id of each of its rows */
   def packed: (QLinear, Array[Int])
+  /** the rows of `ids` (loaded ones) as one weight: a head over a few tokens (a choice's, okay-desk frames.md §6) */
+  def subset(ids: Array[Int]): QLinear
 
 object Rows:
+  /** quantized rows copied, each from its weight, into one */
+  def rows(from: Array[(QLinear, Int)], in: Int): QLinear =
+    val perRow = in / 8; val groups = in / 64
+    val words = new Array[Int](from.length * perRow); val scales = new Array[Float](from.length * groups)
+    val biases = new Array[Float](from.length * groups)
+    from.zipWithIndex.foreach { case ((q, r), k) =>
+      System.arraycopy(q.words, r * perRow, words, k * perRow, perRow)
+      System.arraycopy(q.scales, r * groups, scales, k * groups, groups)
+      System.arraycopy(q.biases, r * groups, biases, k * groups, groups)
+    }
+    QLinear(from.length, in, words, scales, biases)
   final class Full(q: QLinear) extends Rows:
     def vocab: Int = q.out
     def has(id: Int): Boolean = id >= 0 && id < q.out
     def at(id: Int, i: Int): Float = q.at(id, i)
     def logits(x: Array[Float]): Array[Float] = q(x)
     def packed: (QLinear, Array[Int]) = (q, Array.tabulate(q.out)(identity))
+    def subset(ids: Array[Int]): QLinear = Rows.rows(ids.map(id => (q, id)), q.in)
 
   /** the blocks loaded: each its ids and its rows; `add` one more */
   final class Blocks(val vocab: Int, in: Int) extends Rows:
@@ -102,6 +116,7 @@ object Rows:
       var id = 0
       while id < vocab do { if where(id) >= 0 then out(id) = byPart(where(id))(row(id)); id += 1 }
       out
+    def subset(ids: Array[Int]): QLinear = Rows.rows(ids.filter(has).map(id => (parts(where(id)), row(id))), in)
     def packed: (QLinear, Array[Int]) =
       val ids = (0 until vocab).filter(has).toArray
       val perRow = in / 8; val groups = in / 64
