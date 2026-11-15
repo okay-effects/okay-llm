@@ -155,7 +155,7 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
   private lazy val ropeP = program(Glsl.headNormRope); private lazy val scoresP = program(Glsl.scores)
   private lazy val attendP = program(Glsl.attend); private lazy val addP = program(Glsl.add)
   private lazy val swigluP = program(Glsl.swiglu); private lazy val sliceP = program(Glsl.slice)
-  private lazy val concatP = program(Glsl.concat)
+  private lazy val concatP = program(Glsl.concat); private lazy val logProbP = program(Glsl.logProb)
   private val vao = gl.createVertexArray()
   private val fb = gl.createFramebuffer()
 
@@ -209,6 +209,17 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
     draw(concatP, empty(a.rows + b.rows, a.cols), Seq("na" -> (a.rows * a.cols / 4)), Nil, Seq("A" -> a.tex, "B" -> b.tex))
   def slice(x: T, from: Int, until: Int): T =
     draw(sliceP, empty(until - from, x.cols), Seq("off" -> from * x.cols / 4), Nil, Seq("X" -> x.tex))
+  // the log-probability on the device: the logits, then a fragment a row (its max, its sum, its column); one texel a
+  // row read back, where the vocabulary's logits would be (a phone reads back 600 KB a row else)
+  override def logProbs(x: T, w: W, n: Int, columns: Array[Int])(using scala.concurrent.ExecutionContext)
+      : Future[Array[Float]] =
+    val lg = linear(x, w)
+    val padded = (n + 3) / 4 * 4
+    val ct = tensor(padded / 4, 4, Array.tabulate(padded)(i => if i < n then columns(i).toFloat else -1f))
+    val out = draw(logProbP, empty(n, 4), Seq("cols" -> w.out), Nil, Seq("L" -> lg.tex, "C" -> ct.tex))
+    release(lg); release(ct)
+    val read = rows(out, 0 until n).map(_.map(_.head).toArray); release(out)
+    read
   def rows(x: T, at: Seq[Int]): Future[Vector[Array[Float]]] =
     gl.bindFramebuffer(FB, fb)
     gl.framebufferTexture2D(FB, COLOR0, TEX, x.tex, 0)
@@ -341,6 +352,19 @@ void main() {
   vec4 acc = vec4(0.0);
   for (int j = 0; j <= last; j++) acc += exp(tex1(S, row + j) - m) / z * tex4(V, j * kv * dim / 4 + kvh * dim / 4 + d / 4);
   o = acc;
+}"""
+  /** o.x = log-softmax(L[r])[C[r]]: a fragment a row; a negative column: −1e30 */
+  val logProb: String = head + """
+uniform sampler2D L; uniform sampler2D C; uniform int cols;
+void main() {
+  int r = idx(); if (r >= total) discard;
+  int c4 = cols / 4; float m = -1e30;
+  for (int k = 0; k < c4; k++) { vec4 v = tex4(L, r * c4 + k); m = max(m, max(max(v.x, v.y), max(v.z, v.w))); }
+  float z = 0.0;
+  for (int k = 0; k < c4; k++) { vec4 v = exp(tex4(L, r * c4 + k) - m); z += v.x + v.y + v.z + v.w; }
+  float c = tex1(C, r);
+  float lp = c < 0.0 ? -1e30 : tex1(L, r * cols + int(c)) - m - log(z);
+  o = vec4(lp, 0.0, 0.0, 0.0);
 }"""
   private def elementwise(expr: String) = head + s"""
 uniform sampler2D A; uniform sampler2D B;

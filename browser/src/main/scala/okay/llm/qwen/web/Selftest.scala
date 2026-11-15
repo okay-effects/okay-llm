@@ -90,6 +90,7 @@ object Selftest:
           weigh(d).map(w => ok && weighs("WebGPU", w))) })
       gl = OnWebGl2.create(headsAtOnce = 2)
       okGl <- gl.fold(why => { say(s"WebGL2: $why"); Future.successful(true) },
-        d => { say(s"WebGL2: ${d.adapter}"); run(d).map(check("WebGL2", _)) })
+        d => { say(s"WebGL2: ${d.adapter}"); run(d).map(check("WebGL2", _)).flatMap(ok =>
+          weigh(d).map(w => ok && weighs("WebGL2", w))) })
     yield say(if okGpu && okGl then "selftest: done" else "selftest: failed: a device differs from the CPU"))
       .recover { case e => say(s"selftest: failed: $e"); e.printStackTrace() }
