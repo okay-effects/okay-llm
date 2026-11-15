@@ -41,7 +41,7 @@ final class OnWebGpu private (device: js.Dynamic, val adapter: String)(using Exe
   private lazy val linearP = pipeline(Wgsl.linear); private lazy val normP = pipeline(Wgsl.rmsNorm)
   private lazy val ropeP = pipeline(Wgsl.headNormRope); private lazy val scoresP = pipeline(Wgsl.scores)
   private lazy val attendP = pipeline(Wgsl.attend); private lazy val addP = pipeline(Wgsl.add)
-  private lazy val swigluP = pipeline(Wgsl.swiglu)
+  private lazy val swigluP = pipeline(Wgsl.swiglu); private lazy val logProbP = pipeline(Wgsl.logProb)
 
   private var enc: js.Dynamic = null
   private val pending = scala.collection.mutable.ArrayBuffer.empty[(js.Dynamic, Int)]
@@ -110,6 +110,15 @@ final class OnWebGpu private (device: js.Dynamic, val adapter: String)(using Exe
     val out = T(until - from, x.cols, buffer((until - from) * x.cols * 4, STORAGE | COPY_SRC | COPY_DST))
     encoder().copyBufferToBuffer(x.buffer, from * x.cols * 4, out.buffer, 0, (until - from) * x.cols * 4)
     out
+  // the log-probability on the device: the logits, then a thread a row (its max, its sum, its column); n floats back
+  override def logProbs(x: T, w: W, n: Int, columns: Array[Int])(using ExecutionContext): Future[Array[Float]] =
+    val lg = linear(x, w)
+    val cols = upload(new Uint32Array(js.Array(columns.map(c => if c < 0 then -1.0 else c.toDouble)*)), n * 4)
+    val out = T(n, 1, buffer(math.max(16, n * 4), STORAGE | COPY_SRC | COPY_DST))
+    dispatch(logProbP, Seq(params(Seq(n, w.out), Nil), lg.buffer, cols, out.buffer), (n + 63) / 64)
+    release(lg); destroyLater(cols, n * 4)
+    val read = rows(out, 0 until n).map(_.map(_.head).toArray); release(out)
+    read
   def rows(x: T, at: Seq[Int]): Future[Vector[Array[Float]]] =
     val size = at.size * x.cols * 4
     val staging = buffer(size, MAP_READ | COPY_DST)
@@ -241,6 +250,21 @@ object Wgsl:
   let i = id.y * 4194240u + id.x; if (i >= p.a.x) { return; }
   let g = a[i]; let u = b[i];
   y[i] = $expr;
+}"""
+  /** y[r] = log-softmax(x[r])[col[r]]: a thread a row; a column of all ones bits: −∞ */
+  val logProb: String = head + """
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> col: array<u32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let r = id.x; if (r >= p.a.x) { return; }
+  let d = p.a.y; let base = r * d; var m = -1e30;
+  for (var i = 0u; i < d; i++) { m = max(m, x[base + i]); }
+  var z = 0.0;
+  for (var i = 0u; i < d; i++) { z += exp(x[base + i] - m); }
+  let c = col[r];
+  if (c == 4294967295u) { y[r] = -1e30; return; }
+  y[r] = x[base + c] - m - log(z);
 }"""
   val add: String = elementwise("g + u")
   val swiglu: String = elementwise("g / (1.0 + exp(-g)) * u")

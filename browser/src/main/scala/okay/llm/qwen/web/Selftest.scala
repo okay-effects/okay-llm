@@ -71,9 +71,23 @@ object Selftest:
         say(f"$name vs CPU: states' max abs diff ${sd.mkString(" ")} (the states' max $scale%.0f); logits' $ld%.3f; " +
           s"next token ${if got._3 == cpu._3 then "the same" else "DIFFERENT"}")
         sd.forall(_ < 0.02f * scale + 0.05f) && ld < 0.5f && got._3 == cpu._3
+      // THE OPTIONS WEIGHED PACKED on a device (one forward, the log-probabilities on the device) against the CPU's
+      weigh = (c: Compute) =>
+        val m = Qwen3Compute(c, st, config)
+        val options = Vector(ids.slice(3, 5), ids.slice(5, 6), ids.slice(6, 10))
+        m.run(ids.init, config.layers, Nil, withLogits = false, None, keep = true).flatMap { (_, _, cache) =>
+          val t0 = now()
+          m.score(cache.get, ids.last, options).map { s => cache.foreach(_.free()); (s, now() - t0) } }
+      cpuWeighed <- weigh(OnCpu())
+      weighs = (name: String, got: (Vector[Double], Double)) =>
+        val d = got._1.zip(cpuWeighed._1).map((a, b) => math.abs(a - b)).max
+        val said = got._1.map(x => f"$x%.3f").mkString(" ")
+        say(f"$name packed weighing: $said in ${got._2}%.0f ms; vs CPU max diff $d%.4f")
+        d < 0.1
       gpu <- OnWebGpu.create()
       okGpu <- gpu.fold(why => { say(s"WebGPU: $why"); Future.successful(true) },
-        d => { say(s"WebGPU: ${d.adapter}"); run(d).map(check("WebGPU", _)) })
+        d => { say(s"WebGPU: ${d.adapter}"); run(d).map(check("WebGPU", _)).flatMap(ok =>
+          weigh(d).map(w => ok && weighs("WebGPU", w))) })
       gl = OnWebGl2.create(headsAtOnce = 2)
       okGl <- gl.fold(why => { say(s"WebGL2: $why"); Future.successful(true) },
         d => { say(s"WebGL2: ${d.adapter}"); run(d).map(check("WebGL2", _)) })
