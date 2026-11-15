@@ -42,6 +42,8 @@ final class OnWebGpu private (device: js.Dynamic, val adapter: String)(using Exe
   private lazy val ropeP = pipeline(Wgsl.headNormRope); private lazy val scoresP = pipeline(Wgsl.scores)
   private lazy val attendP = pipeline(Wgsl.attend); private lazy val addP = pipeline(Wgsl.add)
   private lazy val swigluP = pipeline(Wgsl.swiglu); private lazy val logProbP = pipeline(Wgsl.logProb)
+  private lazy val ropeSegP = pipeline(Wgsl.headNormRopeSegments); private lazy val scoresSegP = pipeline(Wgsl.scoresSegments)
+  private lazy val attendSegP = pipeline(Wgsl.attendSegments)
 
   private var enc: js.Dynamic = null
   private val pending = scala.collection.mutable.ArrayBuffer.empty[(js.Dynamic, Int)]
@@ -109,6 +111,30 @@ final class OnWebGpu private (device: js.Dynamic, val adapter: String)(using Exe
   def slice(x: T, from: Int, until: Int): T =
     val out = T(until - from, x.cols, buffer((until - from) * x.cols * 4, STORAGE | COPY_SRC | COPY_DST))
     encoder().copyBufferToBuffer(x.buffer, from * x.cols * 4, out.buffer, 0, (until - from) * x.cols * 4)
+    out
+  // PACKED SEGMENTS in one pass each (no copies of the prefix's keys a segment: 200 options × 28 layers of copies
+  // lost the device): a row's segment start in a buffer
+  private def rowStarts(starts: Array[Int], rows: Int): (js.Dynamic, Int) =
+    val per = Array.tabulate(rows)(r => starts(starts.lastIndexWhere(_ <= r)))
+    (upload(new Uint32Array(js.Array(per.map(_.toDouble)*)), rows * 4), (starts :+ rows).sliding(2).map(p => p(1) - p(0)).max)
+  override def headNormRopeSegments(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int,
+      starts: Array[Int], rows: Int): T =
+    val (st, _) = rowStarts(starts, rows)
+    val out = T(x.rows, x.cols, buffer(x.rows * x.cols * 4, STORAGE | COPY_SRC | COPY_DST))
+    dispatch(ropeSegP, Seq(params(Seq(x.rows, heads, headDim, pos0), Seq(eps, theta)), x.buffer, w.buffer, st, out.buffer),
+      (heads + 63) / 64, x.rows)
+    destroyLater(st, rows * 4)
+    out
+  override def attentionSegments(q: T, kPre: T, vPre: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int,
+      pos0: Int, starts: Array[Int], rows: Int): T =
+    val (st, longest) = rowStarts(starts, rows)
+    val nk = pos0 + longest
+    val scores = buffer(rows * heads * nk * 4, STORAGE)
+    val p = params(Seq(rows, heads, kvHeads, headDim), Seq((1.0 / math.sqrt(headDim)).toFloat, pos0.toFloat, longest.toFloat))
+    dispatch(scoresSegP, Seq(p, q.buffer, kPre.buffer, k.buffer, st, scores), (nk + 63) / 64, rows, heads)
+    val out = T(rows, heads * headDim, buffer(rows * heads * headDim * 4, STORAGE | COPY_SRC | COPY_DST))
+    dispatch(attendSegP, Seq(p, scores, vPre.buffer, v.buffer, st, out.buffer), (headDim + 63) / 64, rows, heads)
+    destroyLater(scores, rows * heads * nk * 4); destroyLater(st, rows * 4)
     out
   // the log-probability on the device: the logits, then a thread a row (its max, its sum, its column); n floats back
   override def logProbs(x: T, w: W, n: Int, columns: Array[Int])(using ExecutionContext): Future[Array[Float]] =
@@ -250,6 +276,74 @@ object Wgsl:
   let i = id.y * 4194240u + id.x; if (i >= p.a.x) { return; }
   let g = a[i]; let u = b[i];
   y[i] = $expr;
+}"""
+  /** the rotation of packed segments: as headNormRope, the position pos0 + (r − the row's segment start) */
+  val headNormRopeSegments: String = head + """
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read> st: array<u32>;
+@group(0) @binding(4) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let hd = id.x; let r = id.y; let heads = p.a.y; let dim = p.a.z; let pos = f32(p.a.w + r - st[r]);
+  if (hd >= heads) { return; }
+  let base = r * heads * dim + hd * dim; let half = dim / 2u;
+  var ss = 0.0;
+  for (var i = 0u; i < dim; i++) { let v = x[base + i]; ss += v * v; }
+  let s = 1.0 / sqrt(ss / f32(dim) + p.b.x);
+  for (var i = 0u; i < half; i++) {
+    let x1 = x[base + i] * s * w[i]; let x2 = x[base + half + i] * s * w[half + i];
+    let a = pos * pow(p.b.y, -2.0 * f32(i) / f32(dim));
+    let c = cos(a); let sn = sin(a);
+    y[base + i] = x1 * c - x2 * sn; y[base + half + i] = x2 * c + x1 * sn;
+  }
+}"""
+  /** packed scores: key j < pos0 the prefix's row j, else the row's own segment's row (start + j − pos0) up to itself */
+  val scoresSegments: String = head + """
+@group(0) @binding(1) var<storage, read> q: array<f32>;
+@group(0) @binding(2) var<storage, read> kp: array<f32>;
+@group(0) @binding(3) var<storage, read> k: array<f32>;
+@group(0) @binding(4) var<storage, read> st: array<u32>;
+@group(0) @binding(5) var<storage, read_write> s: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let j = id.x; let t = id.y; let hd = id.z; let heads = p.a.y; let kv = p.a.z; let dim = p.a.w;
+  let pos0 = u32(p.b.y); let nk = pos0 + u32(p.b.z);
+  if (j >= nk) { return; }
+  let at = (t * heads + hd) * nk + j;
+  let own = t - st[t];
+  if (j > pos0 + own) { s[at] = -1e30; return; }
+  let kvh = hd / (heads / kv);
+  var acc = 0.0;
+  if (j < pos0) {
+    for (var i = 0u; i < dim; i++) { acc += q[t * heads * dim + hd * dim + i] * kp[j * kv * dim + kvh * dim + i]; }
+  } else {
+    let kr = st[t] + (j - pos0);
+    for (var i = 0u; i < dim; i++) { acc += q[t * heads * dim + hd * dim + i] * k[kr * kv * dim + kvh * dim + i]; }
+  }
+  s[at] = acc * p.b.x;
+}"""
+  /** packed attention: softmax over the row's keys (the prefix and its segment up to itself), its values */
+  val attendSegments: String = head + """
+@group(0) @binding(1) var<storage, read> s: array<f32>;
+@group(0) @binding(2) var<storage, read> vp: array<f32>;
+@group(0) @binding(3) var<storage, read> v: array<f32>;
+@group(0) @binding(4) var<storage, read> st: array<u32>;
+@group(0) @binding(5) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x; let t = id.y; let hd = id.z; let heads = p.a.y; let kv = p.a.z; let dim = p.a.w;
+  if (i >= dim) { return; }
+  let pos0 = u32(p.b.y); let nk = pos0 + u32(p.b.z); let last = pos0 + (t - st[t]);
+  let row = (t * heads + hd) * nk; let kvh = hd / (heads / kv);
+  var m = -1e30;
+  for (var j = 0u; j <= last; j++) { m = max(m, s[row + j]); }
+  var z = 0.0;
+  for (var j = 0u; j <= last; j++) { z += exp(s[row + j] - m); }
+  var acc = 0.0;
+  for (var j = 0u; j <= last; j++) {
+    var vv = 0.0;
+    if (j < pos0) { vv = vp[j * kv * dim + kvh * dim + i]; } else { vv = v[(st[t] + j - pos0) * kv * dim + kvh * dim + i]; }
+    acc += exp(s[row + j] - m) / z * vv;
+  }
+  y[t * heads * dim + hd * dim + i] = acc;
 }"""
   /** y[r] = log-softmax(x[r])[col[r]]: a thread a row; a column of all ones bits: −∞ */
   val logProb: String = head + """

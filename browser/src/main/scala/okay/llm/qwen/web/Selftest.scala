@@ -74,14 +74,16 @@ object Selftest:
       // THE OPTIONS WEIGHED PACKED on a device (one forward, the log-probabilities on the device) against the CPU's
       weigh = (c: Compute) =>
         val m = Qwen3Compute(c, st, config)
-        val options = Vector(ids.slice(3, 5), ids.slice(5, 6), ids.slice(6, 10))
+        // three options, then sixty more (a frame line's many): the packed ops must hold them all at once
+        val options = Vector(ids.slice(3, 5), ids.slice(5, 6), ids.slice(6, 10)) ++
+          (0 until 60).map(i => ids.slice(i % 8, i % 8 + 1 + i % 5))
         m.run(ids.init, config.layers, Nil, withLogits = false, None, keep = true).flatMap { (_, _, cache) =>
           val t0 = now()
           m.score(cache.get, ids.last, options).map { s => cache.foreach(_.free()); (s, now() - t0) } }
       cpuWeighed <- weigh(OnCpu())
       weighs = (name: String, got: (Vector[Double], Double)) =>
         val d = got._1.zip(cpuWeighed._1).map((a, b) => math.abs(a - b)).max
-        val said = got._1.map(x => f"$x%.3f").mkString(" ")
+        val said = got._1.take(3).map(x => f"$x%.3f").mkString(" ") + s" … (${got._1.size} options)"
         say(f"$name packed weighing: $said in ${got._2}%.0f ms; vs CPU max diff $d%.4f")
         d < 0.1
       gpu <- OnWebGpu.create()

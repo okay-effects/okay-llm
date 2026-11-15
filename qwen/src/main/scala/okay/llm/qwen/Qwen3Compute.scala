@@ -161,26 +161,18 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
     val n = starts.last; val n0 = cache.n
     val ids = options.flatMap(o => last +: o.init).toArray
     var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(ids(k / hidden), k % hidden)))
-    // a per-segment op over a packed tensor: each segment's rows sliced, the op, the results concatenated back
-    def bySegment(x: c.T)(f: (c.T, Int) => c.T): c.T =
-      options.indices.map { j =>
-        val part = c.slice(x, starts(j), starts(j + 1)); val y = f(part, j); c.release(part); y
-      }.reduceLeft { (a, b) => val ab = c.concat(a, b); c.release(a); c.release(b); ab }
     for (l, li) <- blocks.zipWithIndex do
       val h1 = l.attn match
         case Some(at) =>
           val x = c.rmsNorm(h, at.inNorm, eps)
           val q0 = c.linear(x, at.q); val k0 = c.linear(x, at.k); val v = c.linear(x, at.v); c.release(x)
-          // each segment from position n0: the rotation as a suffix after the prefix
-          val q = bySegment(q0)((p, _) => c.headNormRope(p, at.qNorm, heads, headDim, eps, ropeTheta, n0))
-          val k = bySegment(k0)((p, _) => c.headNormRope(p, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0))
+          // each segment from position n0 (the rotation as a suffix after the prefix), attending to the prefix's keys
+          // and values and to its own rows: one op each on a device (Compute's segment ops)
+          val segs = starts.init.toArray
+          val q = c.headNormRopeSegments(q0, at.qNorm, heads, headDim, eps, ropeTheta, n0, segs, n)
+          val k = c.headNormRopeSegments(k0, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0, segs, n)
           c.release(q0); c.release(k0)
-          // each segment attends to the prefix's keys and values, then to its own
-          val a = bySegment(q) { (qs, j) =>
-            val ks = c.slice(k, starts(j), starts(j + 1)); val vs = c.slice(v, starts(j), starts(j + 1))
-            val ka = c.concat(cache.k(li), ks); val va = c.concat(cache.v(li), vs); c.release(ks); c.release(vs)
-            val out = c.attention(qs, ka, va, heads, kvHeads, headDim, n0); c.release(ka); c.release(va); out
-          }
+          val a = c.attentionSegments(q, cache.k(li), cache.v(li), k, v, heads, kvHeads, headDim, n0, segs, n)
           c.release(q); c.release(k); c.release(v)
           val o = c.linear(a, at.o); c.release(a)
           val h1 = c.add(h, o); c.release(h); c.release(o); h1

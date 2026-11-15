@@ -35,6 +35,29 @@ trait Compute:
    * at positions 0 until k.rows (k.rows = pos0 + q.rows); the head h reads the kv head h / (heads / kvHeads); the
    * scores scaled by 1 / sqrt(headDim) */
   def attention(q: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int = 0): T
+  /** PACKED SEGMENTS (options weighed together, okay-llm `Qwen3Compute.score`): the rows of `x` in segments beginning
+   * at `starts` (ascending, the first 0); a row's position is `pos0` plus its place in its segment. This default
+   * rotates each segment by `headNormRope`; a device does it in one pass */
+  def headNormRopeSegments(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int,
+      starts: Array[Int], rows: Int): T =
+    bySegment(x, starts, rows)((part, _) => headNormRope(part, w, heads, headDim, eps, theta, pos0))
+  /** packed attention: a row of segment s attends to the prefix's keys and values (`kPre`, `vPre`: `pos0` rows) and to
+   * its own segment's rows of `k`, `v` up to itself. This default concatenates them a segment at a time; a device
+   * reads them in place */
+  def attentionSegments(q: T, kPre: T, vPre: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int,
+      starts: Array[Int], rows: Int): T =
+    bySegment(q, starts, rows) { (qs, j) =>
+      val until = if j + 1 < starts.length then starts(j + 1) else rows
+      val ks = slice(k, starts(j), until); val vs = slice(v, starts(j), until)
+      val ka = concat(kPre, ks); val va = concat(vPre, vs); release(ks); release(vs)
+      val out = attention(qs, ka, va, heads, kvHeads, headDim, pos0); release(ka); release(va); out
+    }
+  /** an op a segment, the results concatenated back */
+  protected def bySegment(x: T, starts: Array[Int], rows: Int)(f: (T, Int) => T): T =
+    starts.indices.map { j =>
+      val until = if j + 1 < starts.length then starts(j + 1) else rows
+      val part = slice(x, starts(j), until); val y = f(part, j); release(part); y
+    }.reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
   /** the rows of `a` then the rows of `b` (the same cols) */
   def concat(a: T, b: T): T
   def add(a: T, b: T): T
