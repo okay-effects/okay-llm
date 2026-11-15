@@ -147,3 +147,73 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
       c.release(fin)
       val next = if keep then Some(Cache(ids.length, ks.result(), vs.result(), kept.getOrElse(c.tensor(0, hidden, Array.empty)), layer)) else None
       for cached <- fromCache; s <- states; l <- logits yield (cached ++ s, l, next)
+
+  /** OPTIONS WEIGHED IN ONE FORWARD (packed, okay-desk specs/frames.md §6): after a cached prefix (the context but
+   * its last token), each option a segment — `last` then the option but its last token — at the positions after the
+   * prefix, attending to the prefix and to its own earlier rows only; the rows of all the segments go through every
+   * linear together, so the weights are read once for all the options (decoding is bound by reading them). Each
+   * option's mean log-probability of its tokens. The cache is read, not changed. */
+  def score(cache: Cache, last: Int, options: Vector[Array[Int]])(using ExecutionContext): Future[Vector[Double]] =
+    cache.requireLive()
+    val ns = options.map(_.length)
+    require(ns.forall(_ > 0), "an option of no tokens")
+    val starts = ns.scanLeft(0)(_ + _)
+    val n = starts.last; val n0 = cache.n
+    val ids = options.flatMap(o => last +: o.init).toArray
+    var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(ids(k / hidden), k % hidden)))
+    // a per-segment op over a packed tensor: each segment's rows sliced, the op, the results concatenated back
+    def bySegment(x: c.T)(f: (c.T, Int) => c.T): c.T =
+      options.indices.map { j =>
+        val part = c.slice(x, starts(j), starts(j + 1)); val y = f(part, j); c.release(part); y
+      }.reduceLeft { (a, b) => val ab = c.concat(a, b); c.release(a); c.release(b); ab }
+    for (l, li) <- blocks.zipWithIndex do
+      val h1 = l.attn match
+        case Some(at) =>
+          val x = c.rmsNorm(h, at.inNorm, eps)
+          val q0 = c.linear(x, at.q); val k0 = c.linear(x, at.k); val v = c.linear(x, at.v); c.release(x)
+          // each segment from position n0: the rotation as a suffix after the prefix
+          val q = bySegment(q0)((p, _) => c.headNormRope(p, at.qNorm, heads, headDim, eps, ropeTheta, n0))
+          val k = bySegment(k0)((p, _) => c.headNormRope(p, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0))
+          c.release(q0); c.release(k0)
+          // each segment attends to the prefix's keys and values, then to its own
+          val a = bySegment(q) { (qs, j) =>
+            val ks = c.slice(k, starts(j), starts(j + 1)); val vs = c.slice(v, starts(j), starts(j + 1))
+            val ka = c.concat(cache.k(li), ks); val va = c.concat(cache.v(li), vs); c.release(ks); c.release(vs)
+            val out = c.attention(qs, ka, va, heads, kvHeads, headDim, n0); c.release(ka); c.release(va); out
+          }
+          c.release(q); c.release(k); c.release(v)
+          val o = c.linear(a, at.o); c.release(a)
+          val h1 = c.add(h, o); c.release(h); c.release(o); h1
+        case None => h
+      h = l.mlp match
+        case Some(m) =>
+          val y = c.rmsNorm(h1, m.postNorm, eps)
+          val g = c.linear(y, m.gate); val u = c.linear(y, m.up); c.release(y)
+          val act = c.swiglu(g, u); c.release(g); c.release(u)
+          val d = c.linear(act, m.down); c.release(act)
+          val h2 = c.add(h1, d); c.release(h1); c.release(d); h2
+        case None => h1
+    val fin = c.rmsNorm(h, norm, eps); c.release(h)
+    // the log-probability of each row's next token (the option's own): log-softmax over the head's tokens, a chunk of
+    // rows at a time read back (a token the head has not is impossible: −∞)
+    val targets = options.flatMap(_.toVector).toArray
+    val chunk = 32
+    def logProbs(rows: Vector[Array[Float]], from: Int, column: Int => Int): Vector[Double] =
+      rows.zipWithIndex.map { (row, i) =>
+        val m = row.max; val z = row.iterator.map(x => math.exp((x - m).toDouble)).sum
+        val at = column(targets(from + i))
+        if at < 0 || row(at).isNegInfinity then Double.NegativeInfinity else (row(at) - m).toDouble - math.log(z)
+      }
+    val all: Future[Vector[Double]] = head match
+      case Some((hd, hids)) =>
+        val index = hids.zipWithIndex.toMap
+        (0 until n by chunk).foldLeft(Future.successful(Vector.empty[Double])) { (acc, from) =>
+          val until = math.min(n, from + chunk)
+          val part = c.slice(fin, from, until); val lg = c.linear(part, hd); c.release(part)
+          val read = c.rows(lg, 0 until (until - from)); c.release(lg)
+          acc.flatMap(got => read.map(rows => got ++ logProbs(rows, from, t => index.getOrElse(t, -1))))
+        }
+      case None =>
+        c.rows(fin, 0 until n).map(rows => logProbs(rows.map(r => untied.fold(embedding.logits(r))(_(r))), 0, identity))
+    c.release(fin)
+    all.map(lp => options.indices.map(j => lp.slice(starts(j), starts(j + 1)).sum / ns(j)).toVector)

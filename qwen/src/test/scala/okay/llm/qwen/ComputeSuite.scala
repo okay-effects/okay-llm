@@ -56,6 +56,28 @@ class CacheSuite extends munit.FunSuite:
     assert(whole.zip(same).forall((a, b) => a.sameElements(b)))
   }
 
+  test("options weighed in one packed forward == each option scored token by token") {
+    val dir = sys.env.get("QWEN_DIR").map(java.nio.file.Path.of(_))
+    assume(dir.isDefined, "QWEN_DIR not set")
+    val st = Safetensors(java.nio.file.Files.readAllBytes(dir.get.resolve("model.safetensors")))
+    val config = Qwen3Config.parse(java.nio.file.Files.readString(dir.get.resolve("config.json")))
+    val context = Array(151644, 872, 198, 4340, 1657, 6978, 614, 3146, 284, 9625, 30, 151645, 198, 151644, 77091, 198)
+    val options = Vector(Array(9625, 30), Array(3146), Array(284, 9625, 30, 198))
+    val m = Qwen3Compute(OnCpu(), st, config)
+    val (_, _, cache) = Await.result(m.run(context.init, 0, Nil, withLogits = false, None, keep = true), 10.minutes)
+    val packed = Await.result(m.score(cache.get, context.last, options), 10.minutes)
+    // each token's log-probability from the whole sequence's logits, one forward a token
+    val oneByOne = options.map { o =>
+      o.indices.map { j =>
+        val l = Await.result(m.forward(context ++ o.take(j), 0, Nil, withLogits = true), 10.minutes)._2
+        val mx = l.max; val z = l.iterator.map(x => math.exp((x - mx).toDouble)).sum
+        (l(o(j)) - mx).toDouble - math.log(z)
+      }.sum / o.length
+    }
+    println(s"packed ${packed.mkString(" ")}; one by one ${oneByOne.mkString(" ")}")
+    assert(packed.zip(oneByOne).forall((a, b) => math.abs(a - b) < 1e-3), (packed, oneByOne))
+  }
+
 /** the head on the CPU: the same logits as on the device */
 class HeadSuite extends munit.FunSuite:
   override val munitTimeout = 10.minutes
