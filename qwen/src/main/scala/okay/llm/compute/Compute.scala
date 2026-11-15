@@ -44,6 +44,15 @@ trait Compute:
   def slice(x: T, from: Int, until: Int): T
   /** the rows `at` read back */
   def rows(x: T, at: Seq[Int]): Future[Vector[Array[Float]]]
+  /** THE LOG-PROBABILITY OF A COLUMN, A ROW: for each of the `n` rows of `x`, log-softmax(x · wᵀ) at `columns(row)` —
+   * one number a row read back, where the logits' whole rows would be (a weighing of options needs no more). This
+   * default reads the logits back and computes on the CPU; a device does it in place */
+  def logProbs(x: T, w: W, n: Int, columns: Array[Int])(using scala.concurrent.ExecutionContext): Future[Array[Float]] =
+    val lg = linear(x, w)
+    val read = rows(lg, 0 until n); release(lg)
+    read.map(_.zip(columns).map { (row, at) =>
+      val m = row.max; val z = row.iterator.map(v => math.exp((v - m).toDouble)).sum
+      if at < 0 then Float.NegativeInfinity else ((row(at) - m).toDouble - math.log(z)).toFloat }.toArray)
   def release(x: T): Unit
 
 /** A QUANTIZED LINEAR: W [out, in] = scales · q + biases by groups of 64 along `in`; the 4-bit values eight a word,

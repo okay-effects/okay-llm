@@ -209,9 +209,10 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
         val index = hids.zipWithIndex.toMap
         (0 until n by chunk).foldLeft(Future.successful(Vector.empty[Double])) { (acc, from) =>
           val until = math.min(n, from + chunk)
-          val part = c.slice(fin, from, until); val lg = c.linear(part, hd); c.release(part)
-          val read = c.rows(lg, 0 until (until - from)); c.release(lg)
-          acc.flatMap(got => read.map(rows => got ++ logProbs(rows, from, t => index.getOrElse(t, -1))))
+          val part = c.slice(fin, from, until)
+          val cols = (from until until).map(r => index.getOrElse(targets(r), -1)).toArray
+          val read = c.logProbs(part, hd, until - from, cols); c.release(part)
+          acc.flatMap(got => read.map(lp => got ++ lp.map(_.toDouble)))
         }
       case None =>
         c.rows(fin, 0 until n).map(rows => logProbs(rows.map(r => untied.fold(embedding.logits(r))(_(r))), 0, identity))

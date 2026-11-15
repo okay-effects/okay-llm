@@ -65,6 +65,15 @@ final class OnMlx extends Compute:
     val cols = x.dim(1); val f = Mlx.astype(x, Dtype.Float32); t += f
     val all = f.eval().toFloats
     Future.successful(at.toVector.map(i => all.slice(i * cols, (i + 1) * cols))) }
+  // the log-probability on the device: the logits, their log-sum-exp along the row, the column picked; one float a row
+  override def logProbs(x: T, w: W, n: Int, columns: Array[Int])(using scala.concurrent.ExecutionContext)
+      : Future[Array[Float]] = freeing { t =>
+    val lg = linear(x, w); val lse = Mlx.logsumexp(lg, 1, keepdims = true); t ++= Seq(lg, lse)
+    val idx = Mlx.ints(columns.map(math.max(_, 0)), n, 1); val picked = Mlx.takeAlong(lg, idx, 1); t ++= Seq(idx, picked)
+    val lp = Mlx.subtract(picked, lse); t += lp
+    val out = Mlx.astype(lp, Dtype.Float32); t += out
+    val got = out.eval().toFloats
+    Future.successful(got.indices.map(i => if columns(i) < 0 then Float.NegativeInfinity else got(i)).toArray) }
   def release(x: T): Unit = s.release(x)
   /** every tensor freed */
   override def close(): Unit = s.close()

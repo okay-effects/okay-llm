@@ -45,3 +45,17 @@ class MlxSuite extends munit.FunSuite:
     assert(diff.forall(_ < 1e-2f), diff)
     mlx.close()
   }
+
+  test("on OnMlx the options weighed packed, the log-probabilities on the device == on the CPU") {
+    assume(dir.isDefined, "QWEN_DIR not set")
+    val (st, config) = load()
+    val options = Vector(Array(9625, 30), Array(3146), Array(284, 9625, 30, 198))
+    def weigh(c: okay.llm.compute.Compute) =
+      val m = Qwen3Compute(c, st, config)
+      val (_, _, cache) = Await.result(m.run(ids.init, 0, Nil, withLogits = false, None, keep = true), 10.minutes)
+      Await.result(m.score(cache.get, ids.last, options), 10.minutes)
+    val mlx = OnMlx(); val gpu = weigh(mlx); val cpu = weigh(OnCpu())
+    println(s"packed on mlx ${gpu.mkString(" ")}; on the cpu ${cpu.mkString(" ")}")
+    assert(gpu.zip(cpu).forall((a, b) => math.abs(a - b) < 2e-2), (gpu, cpu))
+    mlx.close()
+  }
