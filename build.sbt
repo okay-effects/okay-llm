@@ -36,7 +36,7 @@ lazy val core = crossProject(JVMPlatform, NativePlatform, JSPlatform).crossType(
   .jvmSettings(jvmNative)
   .nativeSettings(jvmNative)
 
-lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects).map(p => p: ProjectReference) :+ (browser: ProjectReference) :+ (mlx: ProjectReference): _*)
+lazy val root = (project in file(".")).aggregate((core.componentProjects ++ qwen.componentProjects ++ read.componentProjects).map(p => p: ProjectReference) :+ (browser: ProjectReference) :+ (mlx: ProjectReference): _*)
   .settings(publish / skip := true)
 
 /** the sources of the JVM and Scala Native, not of Scala.js: core/src/{main,test}/scala-jvm-native */
@@ -68,3 +68,9 @@ lazy val mlx = project.in(file("mlx")).dependsOn(qwen.jvm)
     resolvers += "mlx-scala" at "https://sergey-scherbina.github.io/mlx-scala/maven",
     libraryDependencies ++= Seq("io.github.sergey-scherbina" %% "mlx-scala" % "0.1.0", "org.scalameta" %% "munit" % "1.2.3" % Test),
     Test / fork := true, Test / javaOptions ++= Seq("--enable-native-access=ALL-UNNAMED", s"-Dokm.lib=$mlxNativeLib/libokm.dylib", "-Xmx4g", "-Xss16m"))
+
+/** THE MODEL READ BY A PROGRAM (okay-desk's `Read`, moved here 2026-11-16 for every app — okay-desk, okay-invest):
+ * the effect `Read` (the prompt, the tokens, the options weighed, the states) and its handler on `Qwen3Compute`
+ * (`OnQwen`, one prefix cached) — the same program on the JVM (`OnMlx`, the CPU) and in the browser (WebGPU, WebGL2) */
+lazy val read = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).in(file("read")).dependsOn(core, qwen)
+  .settings(name := "okay-llm-read", libraryDependencies += "org.scalameta" %%% "munit" % "1.2.3" % Test)

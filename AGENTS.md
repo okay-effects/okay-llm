@@ -134,3 +134,12 @@ Build: `sbt test`, `sbt publishLocal` (okay-mlx depends on it). Lines at most 12
   causal mask of the positions. The JVM runs the same program as the browser; mlx-scala's own forward is not needed
   for reading. Law: `QWEN_DIR=<model dir> sbt mlx/test` (OnMlx == OnCpu: states within 1e-3 of their scale, the
   same next token; the cached prefix then the rest == the whole). Needs the native library (`MLX_SCALA_LIB`).
+
+## read (2026-11-16)
+
+- `read` (JVM, Scala.js; artifact okay-llm-read, package `okay.llm.read`): okay-desk's `Read` moved here for every
+  app — the effect a program reads a model by (`Prompt`, `Encode`, `Decode`, `Logits`, `States`, `Note`, and
+  `Score`: a choice's options weighed at once, the mean log-probability of each option's tokens after a context),
+  `Reading` (a handler in place: `Read.sync`, `Read.run`), `Read.async`/`Read.future` (the browser's futures) and
+  `OnQwen` — the handler on `Qwen3Compute` (any `Compute`: `OnMlx`, `OnCpu`, WebGPU, WebGL2), one prefix cached,
+  Qwen3's chat template with thinking off. Users: okay-invest's goal reader; okay-desk to move to it.
