@@ -143,3 +143,6 @@ Build: `sbt test`, `sbt publishLocal` (okay-mlx depends on it). Lines at most 12
   `Reading` (a handler in place: `Read.sync`, `Read.run`), `Read.async`/`Read.future` (the browser's futures) and
   `OnQwen` — the handler on `Qwen3Compute` (any `Compute`: `OnMlx`, `OnCpu`, WebGPU, WebGL2), one prefix cached,
   Qwen3's chat template with thinking off. Users: okay-invest's goal reader; okay-desk to move to it.
+- Also in `read`: `Adapted` — LoRA adapters beside the 4-bit base on any `Compute` (several, one in use; on or off);
+  in `mlx`: `AdapterExport` — mlx-scala's `Lora.save` written as `Adapted` reads it (4 bits + a 4-bit residual).
+  Both moved from okay-desk 2026-11-16.
