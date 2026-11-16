@@ -75,8 +75,8 @@ final class OnQwen(model: Qwen3Compute, tok: Tokenizer, layer: Int,
   /**
    * THE STATES OF ONE READING, KEEPING NOTHING (okay-desk specs/formalization.md §18.3): a statement reader asks once
    * about a prompt no later ask begins with — so no prefix is kept, and each layer's keys and values are let go as
-   * soon as the next layer is computed. On a phone that is the difference between all the layers' keys and values of a long
-   * task at once (some 100 MB) and one layer's. The cache of other readers is dropped first.
+   * soon as the next layer is computed. On a phone that is the difference between all the layers' keys and values
+   * of a long task at once (some 100 MB) and one layer's. The cache of other readers is dropped first.
    */
   def statesOnce(ids: Array[Int], at: Seq[Int]): Future[Vector[Array[Float]]] =
     clearCache()
