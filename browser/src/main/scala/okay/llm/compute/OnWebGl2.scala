@@ -76,6 +76,30 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
     while i < data.length do { padded(i) = OnWebGl2.half(data(i)); i += 1 }
     texture(h, padded, 2)
   def quantized(q: QLinear): W = W(q.out, q.in, wordTexture(q.words), halfTexture(q.scales), halfTexture(q.biases))
+  /** A WEIGHT STRAIGHT FROM THE FILE'S BYTES: the words sent from a view of the fetched buffer (the full rows as they
+   * lie, the last row padded alone), the BF16 scales and biases made halves in one pass — where `quantized` from a
+   * `QLinear` made three copies of every weight on its way (a Scala array, a typed one, a padded one): 400 MB of a
+   * phone's tab while the model loaded (okay-desk specs/phone.md §4.1) */
+  def quantizedFrom(out: Int, in: Int, words: Uint32Array, scales: Uint16Array, biases: Uint16Array): W =
+    W(out, in, wordView(words), bf16Texture(scales), bf16Texture(biases))
+  private def wordView(words: Uint32Array): js.Dynamic =
+    val n = words.length
+    val h = height((n + 3) / 4)
+    val t = texture(h, null, 1)
+    val full = n / (WIDTH * 4)
+    if full > 0 then
+      gl.texSubImage2D(TEX, 0, 0, 0, WIDTH, full, RGBA_INTEGER, UINT, words.subarray(0, full * WIDTH * 4))
+    if n > full * WIDTH * 4 then
+      val last = new Uint32Array(WIDTH * 4); last.set(words.subarray(full * WIDTH * 4))
+      gl.texSubImage2D(TEX, 0, 0, full, WIDTH, 1, RGBA_INTEGER, UINT, last)
+    t
+  private def bf16Texture(raw: Uint16Array): js.Dynamic =
+    val h = height((raw.length + 3) / 4)
+    val padded = new Uint16Array(WIDTH * h * 4)
+    var i = 0
+    while i < raw.length do
+      padded(i) = OnWebGl2.half(java.lang.Float.intBitsToFloat(raw(i) << 16)); i += 1
+    texture(h, padded, 2)
   // A POOL OF TEXTURES by height: an op takes one of its size, a release puts it back — a texture created and
   // deleted for every op (thousands a question) was freed late by a phone's driver and the tab died; the pool holds
   // at most `pooled` bytes, the rest deleted

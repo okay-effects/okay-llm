@@ -93,26 +93,35 @@ object Tokenizer:
   def fromJson(json: Json): Tokenizer =
     val model = json("model")
     require(model("type").string == "BPE", s"a BPE model expected: ${model("type")}")
-    val vocab = java.util.HashMap[String, Integer]()
-    var top = 0
-    for (k, v) <- model("vocab").record do
-      vocab.put(k, v.int)
-      top = top max v.int
-    val ranks = java.util.HashMap[String, Integer]()
-    for (m, r) <- model("merges").list.zipWithIndex do
-      val key = m match
-        case Json.Arr(Vector(a, b)) => a.string + " " + b.string
-        case s => s.string
-      ranks.put(key, r)
-    val added = json("added_tokens").list.map(t => t("content").string -> t("id").int).toMap
-    val special = json("added_tokens").list.filter(_.field("special").exists(_.boolean)).map(_("id").int).toSet
-    val pieces = new Array[String]((top max added.values.max) + 1)
-    vocab.forEach((k, v) => pieces(v) = k)
-    for (k, v) <- added do pieces(v) = k
     val nfc = json("normalizer") match
       case Json.Null => false
       case n if n("type").string == "NFC" => true
       case n => sys.error(s"a normalizer not supported: $n")
+    of(model("vocab").record.iterator.map((k, v) => k -> v.int),
+      model("merges").list.iterator.map {
+        case Json.Arr(Vector(a, b)) => a.string + " " + b.string
+        case s => s.string },
+      json("added_tokens").list.map(t => (t("content").string, t("id").int,
+        t.field("special").exists(_.boolean))), nfc)
+
+  /** THE TOKENIZER FROM ITS PARTS, read by any parser: the vocabulary (piece → id), the merges in rank order ("a b"),
+   * the added tokens (content, id, special), NFC or none. A page reads tokenizer.json with the browser's own
+   * `JSON.parse` and gives the parts here — no tree of the file's 11 MB kept on the way (a phone's tab: 340 MB) */
+  def of(vocabulary: Iterator[(String, Int)], merges: Iterator[String], addedTokens: Seq[(String, Int, Boolean)],
+      nfc: Boolean): Tokenizer =
+    val vocab = java.util.HashMap[String, Integer]()
+    var top = 0
+    for (k, v) <- vocabulary do
+      vocab.put(k, v)
+      top = top max v
+    val ranks = java.util.HashMap[String, Integer]()
+    var r = 0
+    for m <- merges do { ranks.put(m, r); r += 1 }
+    val added = addedTokens.map(t => t._1 -> t._2).toMap
+    val special = addedTokens.filter(_._3).map(_._2).toSet
+    val pieces = new Array[String]((top max added.values.max) + 1)
+    vocab.forEach((k, v) => pieces(v) = k)
+    for (k, v) <- added do pieces(v) = k
     new Tokenizer(vocab, ranks, pieces, added, special, nfc)
 
   // GPT-2's byte characters: the printable bytes as themselves, the rest from 256 on

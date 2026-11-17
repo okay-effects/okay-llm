@@ -39,6 +39,8 @@ final class Safetensors(buffer: java.nio.ByteBuffer) extends Tensors:
     b.slice().order(java.nio.ByteOrder.LITTLE_ENDIAN)
   private val headerLength: Long = view(0, 8).getLong
   private val base = 8 + headerLength.toInt
+  /** where the tensors' bytes begin in the file: an entry's bytes are at `dataStart + from` until `dataStart + until` */
+  def dataStart: Int = base
   final case class Entry(dtype: String, shape: Vector[Int], from: Int, until: Int)
   val entries: Map[String, Entry] =
     Json.fromText({ val h = new Array[Byte](headerLength.toInt); view(8, h.length).get(h); new String(h, "UTF-8") }) match
