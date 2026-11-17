@@ -153,7 +153,8 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
    * prefix, attending to the prefix and to its own earlier rows only; the rows of all the segments go through every
    * linear together, so the weights are read once for all the options (decoding is bound by reading them). Each
    * option's mean log-probability of its tokens. The cache is read, not changed. */
-  def score(cache: Cache, last: Int, options: Vector[Array[Int]], within: Boolean = false)(using ExecutionContext)
+  def score(cache: Cache, last: Int, options: Vector[Array[Int]], within: Boolean = false,
+      over: Option[Array[Int]] = None)(using ExecutionContext)
       : Future[Vector[Double]] =
     cache.requireLive()
     val ns = options.map(_.length)
@@ -195,7 +196,8 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
     // of decoding constrained to them; the head a few hundred rows, dequantized on the CPU, the states read back (a
     // phone has no room for the vocabulary's head on its device, and 152k rows a state on its CPU are minutes)
     if within then
-      val ids = targets.distinct
+      // `over`: the tokens of a whole choice weighed in parts — each part normed over them all, as in one forward
+      val ids = over.fold(targets)(o => o ++ targets).distinct
       val at = ids.zipWithIndex.toMap
       val head = ids.map(id => Array.tabulate(hidden)(i => untied.fold(embedding.at(id, i))(_.at(id, i))))
       val read = c.rows(fin, 0 until n); c.release(fin)
