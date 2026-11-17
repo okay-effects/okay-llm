@@ -66,6 +66,17 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
       consumed = true
       k.indices.foreach(freeLayer)
       freeStates()
+    /** THE FIRST `m` ROWS AS A CACHE OF THEIR OWN (copies; this one unchanged): a next question over the same tables
+     * shares the prompt's beginning — the tables — with the last, and only its own rest is run (a phone: 37 s of the
+     * prompt's forward each question, okay-desk specs/phone.md §4.2) */
+    def take(m: Int): Cache =
+      requireLive()
+      require(m > 0 && m <= n, s"rows $m of a cache of $n")
+      require(!statesReleased || layer == 0, "the states were let go")
+      // a layer without attention (removed by a map) keeps no rows: an empty tensor again
+      def rows(ts: Vector[c.T]): Vector[c.T] = ts.zipWithIndex.map { (t, li) =>
+        if blocks(li).attn.isEmpty then c.tensor(0, kvDim, Array.empty) else c.cache(c.slice(t, 0, m)) }
+      Cache(m, rows(k), rows(v), if statesReleased then c.tensor(0, hidden, Array.empty) else c.slice(h, 0, m), layer)
 
   /** the residual after `layer` at the rows `at` (none when `layer` is 0), and the next token's logits if asked */
   def forward(ids: Array[Int], layer: Int, at: Seq[Int], withLogits: Boolean)(using ExecutionContext)
