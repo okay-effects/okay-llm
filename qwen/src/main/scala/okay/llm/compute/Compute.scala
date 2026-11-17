@@ -52,6 +52,31 @@ trait Compute:
       val ka = concat(kPre, ks); val va = concat(vPre, vs); release(ks); release(vs)
       val out = attention(qs, ka, va, heads, kvHeads, headDim, pos0); release(ka); release(va); out
     }
+  /** A TREE OF ROWS (options weighed as a trie, theory.md E7 of okay-desk): row r at position `pos0 + depth(r)`, its
+   * parent `parent(r)` (−1: a child of the prefix). `treeFast`: the device does the two tree ops in one pass each;
+   * the defaults below go a row at a time (right on any device, slow — for a law, not for a page) */
+  def treeFast: Boolean = false
+  /** every head of every row RMS-normed and rotated at the row's own position, `pos0 + depth(r)` */
+  def headNormRopeTree(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int,
+      depth: Array[Int], rows: Int): T =
+    (0 until rows).map { r =>
+      val part = slice(x, r, r + 1); val y = headNormRope(part, w, heads, headDim, eps, theta, pos0 + depth(r))
+      release(part); y
+    }.reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
+  /** tree attention: row r attends to the prefix's keys and values (`kPre`, `vPre`: `pos0` rows) and to the rows of
+   * its ancestors and itself, root first */
+  def attentionTree(q: T, kPre: T, vPre: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int,
+      parent: Array[Int], rows: Int): T =
+    def path(r: Int): List[Int] = if r < 0 then Nil else path(parent(r)) :+ r
+    (0 until rows).map { r =>
+      val chain = path(r)
+      val ks = chain.map(a => slice(k, a, a + 1)).reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
+      val vs = chain.map(a => slice(v, a, a + 1)).reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
+      val ka = concat(kPre, ks); val va = concat(vPre, vs); release(ks); release(vs)
+      val qr = slice(q, r, r + 1)
+      val out = attention(qr, ka, va, heads, kvHeads, headDim, pos0 + chain.size - 1)
+      release(qr); release(ka); release(va); out
+    }.reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
   /** an op a segment, the results concatenated back */
   protected def bySegment(x: T, starts: Array[Int], rows: Int)(f: (T, Int) => T): T =
     starts.indices.map { j =>

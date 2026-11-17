@@ -262,6 +262,38 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
       draw(attendSegP, out, ints, Nil, Seq("S" -> s.tex, "VP" -> vPre.tex, "V" -> v.tex, "ST" -> st.tex))
       release(s)
     release(st); out
+  // THE TREE in one pass each (options as a trie): a row's depth, and its ancestors' rows by depth (root first)
+  private lazy val ropeTreeP = program(Glsl.headNormRopeTree); private lazy val scoresTreeP = program(Glsl.scoresTree)
+  private lazy val attendTreeP = program(Glsl.attendTree)
+  override def treeFast: Boolean = true
+  private def floats(values: Array[Int]): T =
+    val padded = (values.length + 3) / 4 * 4
+    tensor(padded / 4, 4, values.map(_.toFloat) ++ Array.fill(padded - values.length)(0f))
+  override def headNormRopeTree(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int,
+      depth: Array[Int], rows: Int): T =
+    val dt = floats(depth.take(rows))
+    val out = draw(ropeTreeP, empty(x.rows, x.cols), Seq("heads" -> heads, "dim" -> headDim, "pos0" -> pos0),
+      Seq("eps" -> eps, "theta" -> theta), Seq("X" -> x.tex, "Wn" -> w.tex, "D" -> dt.tex))
+    release(dt); out
+  override def attentionTree(q: T, kPre: T, vPre: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int,
+      parent: Array[Int], rows: Int): T =
+    def path(r: Int): List[Int] = if r < 0 then Nil else path(parent(r)) :+ r
+    val paths = Array.tabulate(rows)(path)
+    val dmax = paths.map(_.size).max
+    val dt = floats(paths.map(_.size - 1))
+    val an = floats(paths.flatMap(p => p.toArray ++ Array.fill(dmax - p.size)(0)))
+    val nk = pos0 + dmax; val np = (nk + 3) / 4 * 4
+    val g = math.max(1, math.min(heads, headsAtOnce))
+    val out = empty(rows, heads * headDim)
+    for first <- 0 until heads by g do
+      val gs = math.min(g, heads - first)
+      val ints = Seq("n" -> rows, "nk" -> nk, "np" -> np, "heads" -> heads, "kv" -> kvHeads, "dim" -> headDim,
+        "pos0" -> pos0, "hg0" -> first, "G" -> gs, "dmax" -> dmax)
+      val s = draw(scoresTreeP, empty(rows * gs, np), ints, Seq("scale" -> (1.0 / math.sqrt(headDim)).toFloat),
+        Seq("Q" -> q.tex, "KP" -> kPre.tex, "K" -> k.tex, "D" -> dt.tex, "AN" -> an.tex))
+      draw(attendTreeP, out, ints, Nil, Seq("S" -> s.tex, "VP" -> vPre.tex, "V" -> v.tex, "D" -> dt.tex, "AN" -> an.tex))
+      release(s)
+    release(dt); release(an); out
   // the log-probability on the device: the logits, then a fragment a row (its max, its sum, its column); one texel a
   // row read back, where the vocabulary's logits would be (a phone reads back 600 KB a row else)
   override def logProbs(x: T, w: W, n: Int, columns: Array[Int])(using scala.concurrent.ExecutionContext)
@@ -463,6 +495,67 @@ void main() {
   for (int j = 0; j <= last; j++) {
     vec4 vv = j < pos0 ? tex4(VP, j * kv * dim / 4 + kvh * dim / 4 + d / 4)
       : tex4(V, (st + j - pos0) * kv * dim / 4 + kvh * dim / 4 + d / 4);
+    acc += exp(tex1(S, row + j) - m) / z * vv;
+  }
+  o = acc;
+}"""
+  /** THE TREE (options as a trie): a row's position pos0 + its depth D[r]; its ancestors' rows AN[r · dmax + d], root
+   * first — the segments' shaders with "the row's segment" made "the row's path" */
+  val headNormRopeTree: String = head + """
+uniform sampler2D X; uniform sampler2D Wn; uniform sampler2D D; uniform int heads; uniform int dim; uniform float eps;
+uniform float theta; uniform int pos0;
+float ro(int r, int hd, int d, float s) {
+  int hf = dim / 2; int base = r * heads * dim + hd * dim;
+  int lo = d < hf ? d : d - hf;
+  float x1 = tex1(X, base + lo) * s * tex1(Wn, lo); float x2 = tex1(X, base + lo + hf) * s * tex1(Wn, lo + hf);
+  float a = float(pos0 + int(tex1(D, r))) * pow(theta, -2.0 * float(lo) / float(dim));
+  return d < hf ? x1 * cos(a) - x2 * sin(a) : x2 * cos(a) + x1 * sin(a);
+}
+void main() {
+  int i = idx(); if (i >= total) discard;
+  int c4 = heads * dim / 4; int r = i / c4; int c = (i - r * c4) * 4; int hd = c / dim; int d = c - hd * dim;
+  int base = r * c4 + hd * dim / 4; int h4 = dim / 4;
+  float ss = 0.0;
+  for (int k = 0; k < h4; k++) { vec4 v = tex4(X, base + k); ss += dot(v, v); }
+  float s = inversesqrt(ss / float(dim) + eps);
+  o = vec4(ro(r, hd, d, s), ro(r, hd, d + 1, s), ro(r, hd, d + 2, s), ro(r, hd, d + 3, s));
+}"""
+  val scoresTree: String = head + """
+uniform sampler2D Q; uniform sampler2D KP; uniform sampler2D K; uniform sampler2D D; uniform sampler2D AN;
+uniform int n; uniform int nk; uniform int np; uniform int heads; uniform int kv; uniform int dim; uniform float scale;
+uniform int pos0; uniform int hg0; uniform int G; uniform int dmax;
+float score(int t, int hd, int j) {
+  int dp = int(tex1(D, t));
+  if (j > pos0 + dp || j >= nk) return -1e30;
+  int kvh = hd / (heads / kv); int qb = t * heads * dim / 4 + hd * dim / 4;
+  float a = 0.0;
+  if (j < pos0) { int kb = j * kv * dim / 4 + kvh * dim / 4; for (int k = 0; k < dim / 4; k++) a += dot(tex4(Q, qb + k), tex4(KP, kb + k)); }
+  else { int an = int(tex1(AN, t * dmax + j - pos0)); int kb = an * kv * dim / 4 + kvh * dim / 4;
+    for (int k = 0; k < dim / 4; k++) a += dot(tex4(Q, qb + k), tex4(K, kb + k)); }
+  return a * scale;
+}
+void main() {
+  int i = idx(); if (i >= total) discard;
+  int c4 = np / 4; int row = i / c4; int j = (i - row * c4) * 4; int t = row / G; int hd = hg0 + row - t * G;
+  o = vec4(score(t, hd, j), score(t, hd, j + 1), score(t, hd, j + 2), score(t, hd, j + 3));
+}"""
+  val attendTree: String = head + """
+uniform sampler2D S; uniform sampler2D VP; uniform sampler2D V; uniform sampler2D D; uniform sampler2D AN;
+uniform int n; uniform int nk; uniform int np; uniform int heads; uniform int kv; uniform int dim; uniform int pos0;
+uniform int hg0; uniform int G; uniform int dmax;
+void main() {
+  int i = idx(); if (i >= total) discard;
+  int c4 = heads * dim / 4; int t = i / c4; int c = (i - t * c4) * 4; int hd = c / dim; int d = c - hd * dim;
+  if (hd < hg0 || hd >= hg0 + G) discard;
+  int kvh = hd / (heads / kv); int row = (t * G + hd - hg0) * np; int last = pos0 + int(tex1(D, t));
+  float m = -1e30;
+  for (int j = 0; j <= last; j++) m = max(m, tex1(S, row + j));
+  float z = 0.0;
+  for (int j = 0; j <= last; j++) z += exp(tex1(S, row + j) - m);
+  vec4 acc = vec4(0.0);
+  for (int j = 0; j <= last; j++) {
+    vec4 vv = j < pos0 ? tex4(VP, j * kv * dim / 4 + kvh * dim / 4 + d / 4)
+      : tex4(V, int(tex1(AN, t * dmax + j - pos0)) * kv * dim / 4 + kvh * dim / 4 + d / 4);
     acc += exp(tex1(S, row + j) - m) / z * vv;
   }
   o = acc;

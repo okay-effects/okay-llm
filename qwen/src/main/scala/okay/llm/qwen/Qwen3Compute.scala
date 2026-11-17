@@ -148,15 +148,73 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
       val next = if keep then Some(Cache(ids.length, ks.result(), vs.result(), kept.getOrElse(c.tensor(0, hidden, Array.empty)), layer)) else None
       for cached <- fromCache; s <- states; l <- logits yield (cached ++ s, l, next)
 
+  /** OPTIONS WEIGHED AS A TRIE (okay-desk theory.md §11 E7): the rows fed are the options' distinct beginnings — a
+   * beginning shared by many options ("where: status =") is one row, not one a segment; each row at the position of
+   * its depth, attending to the prefix and to its ancestors. Every option's token sees exactly the tokens it saw in a
+   * segment of its own, so the numbers are the packed segments' (`within` only: the log-softmax over the options'
+   * tokens, or `over`'s); the frame's 171 options of a `where` are 317 rows, not 1037. */
+  private def scoreTree(cache: Cache, last: Int, options: Vector[Array[Int]], over: Option[Array[Int]])(
+      using ExecutionContext): Future[Vector[Double]] =
+    require(options.forall(_.nonEmpty), "an option of no tokens")
+    // the fed sequences (last, then the option but its last token); a node a distinct beginning of them
+    val fed = options.map(o => (last +: o.init).toVector)
+    val index = scala.collection.mutable.LinkedHashMap.empty[Vector[Int], Int]
+    for f <- fed; k <- 1 to f.length do index.getOrElseUpdate(f.take(k), index.size)
+    val nodes = index.keys.toArray
+    val n = nodes.length; val n0 = cache.n
+    val parent = nodes.map(p => if p.length == 1 then -1 else index(p.init))
+    val depth = nodes.map(_.length - 1)
+    val ids = nodes.map(_.last)
+    var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(ids(k / hidden), k % hidden)))
+    for (l, li) <- blocks.zipWithIndex do
+      val h1 = l.attn match
+        case Some(at) =>
+          val x = c.rmsNorm(h, at.inNorm, eps)
+          val q0 = c.linear(x, at.q); val k0 = c.linear(x, at.k); val v = c.linear(x, at.v); c.release(x)
+          val q = c.headNormRopeTree(q0, at.qNorm, heads, headDim, eps, ropeTheta, n0, depth, n)
+          val k = c.headNormRopeTree(k0, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0, depth, n)
+          c.release(q0); c.release(k0)
+          val a = c.attentionTree(q, cache.k(li), cache.v(li), k, v, heads, kvHeads, headDim, n0, parent, n)
+          c.release(q); c.release(k); c.release(v)
+          val o = c.linear(a, at.o); c.release(a)
+          val h1 = c.add(h, o); c.release(h); c.release(o); h1
+        case None => h
+      h = l.mlp match
+        case Some(m) =>
+          val y = c.rmsNorm(h1, m.postNorm, eps)
+          val g = c.linear(y, m.gate); val u = c.linear(y, m.up); c.release(y)
+          val act = c.swiglu(g, u); c.release(g); c.release(u)
+          val d = c.linear(act, m.down); c.release(act)
+          val h2 = c.add(h1, d); c.release(h1); c.release(d); h2
+        case None => h1
+    val fin = c.rmsNorm(h, norm, eps); c.release(h)
+    val targets = options.flatMap(_.toVector).toArray
+    val heads0 = over.fold(targets)(o => o ++ targets).distinct
+    val at = heads0.zipWithIndex.toMap
+    val head = heads0.map(id => Array.tabulate(hidden)(i => untied.fold(embedding.at(id, i))(_.at(id, i))))
+    val read = c.rows(fin, 0 until n); c.release(fin)
+    read.map { rows =>
+      // a node's log-softmax over the options' tokens, once a node; each option its path's tokens, their mean
+      val lps = rows.map { row =>
+        val logits = head.map { w => var s = 0.0; var i = 0; while i < hidden do { s += w(i) * row(i); i += 1 }; s }
+        val m = logits.max; val z = math.log(logits.iterator.map(x => math.exp(x - m)).sum)
+        (id: Int) => logits(at(id)) - m - z
+      }
+      options.indices.map { j =>
+        val o = options(j); val f = fed(j)
+        o.indices.map(i => lps(index(f.take(i + 1)))(o(i))).sum / o.length
+      }.toVector
+    }
   /** OPTIONS WEIGHED IN ONE FORWARD (packed, okay-desk specs/frames.md §6): after a cached prefix (the context but
    * its last token), each option a segment — `last` then the option but its last token — at the positions after the
    * prefix, attending to the prefix and to its own earlier rows only; the rows of all the segments go through every
    * linear together, so the weights are read once for all the options (decoding is bound by reading them). Each
    * option's mean log-probability of its tokens. The cache is read, not changed. */
   def score(cache: Cache, last: Int, options: Vector[Array[Int]], within: Boolean = false,
-      over: Option[Array[Int]] = None)(using ExecutionContext)
+      over: Option[Array[Int]] = None, trie: Option[Boolean] = None)(using ExecutionContext)
       : Future[Vector[Double]] =
     cache.requireLive()
+    if within && trie.getOrElse(c.treeFast) then return scoreTree(cache, last, options, over)
     val ns = options.map(_.length)
     require(ns.forall(_ > 0), "an option of no tokens")
     val starts = ns.scanLeft(0)(_ + _)
