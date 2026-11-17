@@ -164,6 +164,35 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
    * its depth, attending to the prefix and to its ancestors. Every option's token sees exactly the tokens it saw in a
    * segment of its own, so the numbers are the packed segments' (`within` only: the log-softmax over the options'
    * tokens, or `over`'s); the frame's 171 options of a `where` are 317 rows, not 1037. */
+  /** A WEIGHED TRIE'S ROWS, KEPT: over the cache `base`, each node (a fed beginning) its row; every layer's keys
+   * (rotated) and values of the rows, the residual after `base.layer` */
+  private final case class Tree(base: Cache, index: Map[Vector[Int], Int], k: Vector[c.T], v: Vector[c.T],
+      h: Option[c.T])
+  private var trees: List[Tree] = Nil
+  /** the kept trees let go (a new cache weighed, or the cache grown) */
+  def dropTrees(): Unit =
+    trees.foreach { t => t.k.foreach(c.release); t.v.foreach(c.release); t.h.foreach(c.release) }
+    trees = Nil
+  /** THE CACHE GROWN BY A WEIGHED LINE, NO FORWARD (a phone: half its forwards a question): `suffix` — the tokens
+   * after `cache`, `last` then the chosen option but its end — is a path of a trie weighed over this very cache; its
+   * rows' keys and values (at the positions they would have, n0 + depth) appended to the cache's. A new cache; this
+   * one unchanged. None where no kept trie has the path */
+  def extend(cache: Cache, suffix: Array[Int]): Option[Cache] =
+    cache.requireLive()
+    val s = suffix.toVector
+    trees.find(t => (t.base eq cache) && s.nonEmpty && (1 to s.length).forall(i => t.index.contains(s.take(i))))
+      .map { t =>
+        val rows = (1 to s.length).map(i => t.index(s.take(i))).toArray
+        def grown(old: c.T, kept: c.T, li: Int): c.T =
+          if blocks(li).attn.isEmpty then c.tensor(0, kvDim, Array.empty)
+          else { val g = c.gather(kept, rows); val all = c.concat(old, g); c.release(g); c.cache(all) }
+        val ks = blocks.indices.map(li => grown(cache.k(li), t.k(li), li)).toVector
+        val vs = blocks.indices.map(li => grown(cache.v(li), t.v(li), li)).toVector
+        val h = t.h.fold(c.tensor(0, hidden, Array.empty)) { kh =>
+          val g = c.gather(kh, rows); val all = c.concat(cache.h, g); c.release(g); all }
+        val next = Cache(cache.n + s.length, ks, vs, h, cache.layer)
+        dropTrees()
+        next }
   private def scoreTree(cache: Cache, last: Int, options: Vector[Array[Int]], over: Option[Array[Int]])(
       using ExecutionContext): Future[Vector[Double]] =
     require(options.forall(_.nonEmpty), "an option of no tokens")
@@ -176,6 +205,10 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
     val parent = nodes.map(p => if p.length == 1 then -1 else index(p.init))
     val depth = nodes.map(_.length - 1)
     val ids = nodes.map(_.last)
+    // THE ROWS KEPT (`trees`): every node's keys and values a layer, and its residual after the cache's layer — the
+    // line chosen next is a path of them, so the cache grows by it with no forward of its own (`extend`)
+    if trees.exists(_.base ne cache) then dropTrees()
+    val keptK = Vector.newBuilder[c.T]; val keptV = Vector.newBuilder[c.T]; var keptH: Option[c.T] = None
     var h = c.tensor(n, hidden, Array.tabulate(n * hidden)(k => embedding.at(ids(k / hidden), k % hidden)))
     for (l, li) <- blocks.zipWithIndex do
       val h1 = l.attn match
@@ -186,10 +219,11 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
           val k = c.headNormRopeTree(k0, at.kNorm, kvHeads, headDim, eps, ropeTheta, n0, depth, n)
           c.release(q0); c.release(k0)
           val a = c.attentionTree(q, cache.k(li), cache.v(li), k, v, heads, kvHeads, headDim, n0, parent, n)
-          c.release(q); c.release(k); c.release(v)
+          c.release(q); keptK += k; keptV += v
           val o = c.linear(a, at.o); c.release(a)
           val h1 = c.add(h, o); c.release(h); c.release(o); h1
-        case None => h
+        case None =>
+          keptK += c.tensor(0, kvDim, Array.empty); keptV += c.tensor(0, kvDim, Array.empty); h
       h = l.mlp match
         case Some(m) =>
           val y = c.rmsNorm(h1, m.postNorm, eps)
@@ -198,6 +232,8 @@ final class Qwen3Compute(val c: Compute, st: Tensors, val config: Qwen3Config, h
           val d = c.linear(act, m.down); c.release(act)
           val h2 = c.add(h1, d); c.release(h1); c.release(d); h2
         case None => h1
+      if li + 1 == cache.layer then keptH = Some(c.slice(h, 0, n))
+    trees = Tree(cache, index.toMap, keptK.result(), keptV.result(), keptH) :: trees
     val fin = c.rmsNorm(h, norm, eps); c.release(h)
     val targets = options.flatMap(_.toVector).toArray
     val heads0 = over.fold(targets)(o => o ++ targets).distinct

@@ -77,6 +77,9 @@ trait Compute:
       val out = attention(qr, ka, va, heads, kvHeads, headDim, pos0 + chain.size - 1)
       release(qr); release(ka); release(va); out
     }.reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
+  /** the rows `at` of `x`, in that order (a device: one pass) */
+  def gather(x: T, at: Array[Int]): T =
+    at.toVector.map(r => slice(x, r, r + 1)).reduceLeft { (a, b) => val ab = concat(a, b); release(a); release(b); ab }
   /** an op a segment, the results concatenated back */
   protected def bySegment(x: T, starts: Array[Int], rows: Int)(f: (T, Int) => T): T =
     starts.indices.map { j =>

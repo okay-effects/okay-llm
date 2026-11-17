@@ -47,6 +47,7 @@ final class Preloaded(val base: Compute) extends Compute:
       pos0: Int, starts: Array[Int], rows: Int): T =
     base.attentionSegments(q, kPre, vPre, k, v, heads, kvHeads, headDim, pos0, starts, rows)
   override def treeFast: Boolean = base.treeFast
+  override def gather(x: T, at: Array[Int]): T = base.gather(x, at)
   override def headNormRopeTree(x: T, w: T, heads: Int, headDim: Int, eps: Float, theta: Float, pos0: Int,
       depth: Array[Int], rows: Int): T = base.headNormRopeTree(x, w, heads, headDim, eps, theta, pos0, depth, rows)
   override def attentionTree(q: T, kPre: T, vPre: T, k: T, v: T, heads: Int, kvHeads: Int, headDim: Int, pos0: Int,

@@ -235,6 +235,11 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
     draw(concatP, empty(a.rows + b.rows, a.cols), Seq("na" -> (a.rows * a.cols / 4)), Nil, Seq("A" -> a.tex, "B" -> b.tex))
   def slice(x: T, from: Int, until: Int): T =
     draw(sliceP, empty(until - from, x.cols), Seq("off" -> from * x.cols / 4), Nil, Seq("X" -> x.tex))
+  private lazy val gatherP = program(Glsl.gather)
+  override def gather(x: T, at: Array[Int]): T =
+    val rows = floats(at)
+    val out = draw(gatherP, empty(at.length, x.cols), Seq("c4" -> x.cols / 4), Nil, Seq("X" -> x.tex, "AT" -> rows.tex))
+    release(rows); out
   // PACKED SEGMENTS in one pass each, the prefix's keys and values read in place (a segment's copies of them are a
   // phone's memory gone): each row's segment start in a float texture
   private def rowStarts(starts: Array[Int], rows: Int): (T, Int) =
@@ -585,6 +590,10 @@ void main() {
   val slice: String = head + """
 uniform sampler2D X; uniform int off;
 void main() { int i = idx(); if (i >= total) discard; o = tex4(X, i + off); }"""
+  /** the rows AT[r] of X, in order: row r of the output, c4 texels a row */
+  val gather: String = head + """
+uniform sampler2D X; uniform sampler2D AT; uniform int c4;
+void main() { int i = idx(); if (i >= total) discard; int r = i / c4; o = tex4(X, int(tex1(AT, r)) * c4 + i - r * c4); }"""
   /** the rows of A (na texels) then the rows of B */
   val concat: String = head + """
 uniform sampler2D A; uniform sampler2D B; uniform int na;
