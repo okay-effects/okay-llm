@@ -68,10 +68,14 @@ object Loader:
       .maxOption.getOrElse(-1)
 
   /** the model of `dir` on `compute`, read no deeper than `upTo`; `scripts`: the embedding's blocks loaded at once
-   * (others when a token of theirs appears); `stage`: what is being done, said as it goes */
+   * (others when a token of theirs appears); `stage`: what is being done, said as it goes; `adapt`: the device and
+   * the weights the forward is made on, from the plain ones — a LoRA adapter beside them (okay-llm-read's `Adapted`)
+   * — and what to do once it is made (the adapter's sources let go) */
   def load(dir: String, compute: Compute, why: Option[String], upTo: Int = Int.MaxValue, phone: Boolean = false,
       cacheName: String = "okay-llm-model", scripts: Vector[String] = Vector("common", "latin-en"),
-      stage: String => Unit = _ => ())(using ExecutionContext): Future[Loaded] =
+      stage: String => Unit = _ => (),
+      adapt: (Compute, Tensors) => (Compute, Tensors, () => Unit) = (c, t) => (c, t, () => ()))
+      (using ExecutionContext): Future[Loaded] =
     def get(name: String) = fetch(s"$dir/$name", cacheName)
     for
       config <- get("config.json").map(text).map(Qwen3Config.parse)
@@ -80,8 +84,10 @@ object Loader:
     yield
       val (st, blocks) = weighed
       stage(s"the weights to ${compute.api}…")
-      val model = Qwen3Compute(compute, st, config, headOnCpu = phone && compute.api != "WebGPU",
+      val (device, tensors, made) = adapt(compute, st)
+      val model = Qwen3Compute(device, tensors, config, headOnCpu = phone && compute.api != "WebGPU",
         embedGiven = blocks.map(_._1))
+      made()
       val ensure: Array[Int] => Future[Unit] = blocks match
         case Some((rows, index, more)) => ids =>
           val missing = ids.filter(id => id < index.length && !rows.has(id)).map(id => Vocab.blocks(index(id).toInt))
