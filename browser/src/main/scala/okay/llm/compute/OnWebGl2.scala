@@ -175,7 +175,7 @@ final class OnWebGl2 private (gl: js.Dynamic, val adapter: String, pooled: Long,
     if !gl.getProgramParameter(p, 0x8B82).asInstanceOf[Boolean] then
       throw IllegalStateException("a program: " + gl.getProgramInfoLog(p))
     p
-  private lazy val linearP = program(Glsl.linear); private lazy val normP = program(Glsl.rmsNorm)
+  private lazy val linearP = program(Glsl.linearShared); private lazy val normP = program(Glsl.rmsNorm)
   private lazy val ropeP = program(Glsl.headNormRope); private lazy val scoresP = program(Glsl.scores)
   private lazy val attendP = program(Glsl.attend); private lazy val addP = program(Glsl.add)
   private lazy val swigluP = program(Glsl.swiglu); private lazy val sliceP = program(Glsl.slice)
@@ -381,6 +381,40 @@ void main() {
   int i = idx(); if (i >= total) discard;
   int o4 = outn / 4; int r = i / o4; int oc = (i - r * o4) * 4;
   o = vec4(dotRow(oc, r), dotRow(oc + 1, r), dotRow(oc + 2, r), dotRow(oc + 3, r));
+}"""
+  /** THE SAME PRODUCT, ITS READS SHARED (a phone is bound by texture reads): the four outputs of a fragment read the
+   * row of X once, not four times, and a group's eight words two texels at a time, not one word a texel — 32 reads a
+   * group of 64 weights where `linear` made 96. Each output's sum in `linear`'s order: the same numbers */
+  val linearShared: String = head + """
+uniform sampler2D X; uniform usampler2D Wd; uniform sampler2D S; uniform sampler2D B;
+uniform int rows; uniform int inn; uniform int outn;
+void main() {
+  int i = idx(); if (i >= total) discard;
+  int o4 = outn / 4; int r = i / o4; int oc = (i - r * o4) * 4;
+  int groups = inn / 64; int perRow = inn / 8; int in4 = inn / 4;
+  vec4 acc = vec4(0.0);
+  for (int gi = 0; gi < groups; gi++) {
+    vec4 s = vec4(tex1(S, oc * groups + gi), tex1(S, (oc + 1) * groups + gi), tex1(S, (oc + 2) * groups + gi),
+      tex1(S, (oc + 3) * groups + gi));
+    vec4 b = vec4(tex1(B, oc * groups + gi), tex1(B, (oc + 1) * groups + gi), tex1(B, (oc + 2) * groups + gi),
+      tex1(B, (oc + 3) * groups + gi));
+    uvec4 wa[4]; uvec4 wb[4];
+    for (int j = 0; j < 4; j++) {
+      int t = ((oc + j) * perRow + gi * 8) >> 2;
+      wa[j] = texelFetch(Wd, at(t), 0); wb[j] = texelFetch(Wd, at(t + 1), 0);
+    }
+    for (int k = 0; k < 8; k++) {
+      int xb = r * in4 + gi * 16 + k * 2;
+      vec4 x0 = tex4(X, xb); vec4 x1 = tex4(X, xb + 1);
+      for (int j = 0; j < 4; j++) {
+        uint w = k < 4 ? wa[j][k] : wb[j][k - 4];
+        vec4 q0 = vec4(float(w & 15u), float((w >> 4u) & 15u), float((w >> 8u) & 15u), float((w >> 12u) & 15u));
+        vec4 q1 = vec4(float((w >> 16u) & 15u), float((w >> 20u) & 15u), float((w >> 24u) & 15u), float(w >> 28u));
+        acc[j] += dot(s[j] * q0 + b[j], x0) + dot(s[j] * q1 + b[j], x1);
+      }
+    }
+  }
+  o = acc;
 }"""
   val rmsNorm: String = head + """
 uniform sampler2D X; uniform sampler2D Wn; uniform int cols; uniform float eps;
